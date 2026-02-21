@@ -1,6 +1,7 @@
 # ============================================================
 # BSNL SLA BILL CHECKER - LOGIC ONLY (FOR STREAMLIT CLOUD)
-# Same outputs as Desktop V4.2
+# DESKTOP LOGIC SAME AS V4.2
+# CHANGE: ONLY Accounts Note TXT + Clause 14.1 TXT wording/format
 # NOTE: tkinter/GUI removed intentionally.
 # ============================================================
 
@@ -215,11 +216,13 @@ def find_exemption_column(columns):
     """
     cols = list(columns)
 
+    # Pass 1: exempt keyword
     for col in cols:
         col_norm = str(col).strip().lower()
         if ("exempt" in col_norm) or ("exemption" in col_norm):
             return col
 
+    # Pass 2: mttr/availability hint + yes/no hint
     for col in cols:
         col_norm = str(col).strip().lower()
         if (("mttr" in col_norm and "penalty" in col_norm)
@@ -232,7 +235,7 @@ def find_exemption_column(columns):
 
 
 # -----------------------------
-# Core Processing (SAME AS DESKTOP)
+# Core Processing
 # -----------------------------
 def process_sla(
     annex_a_path,
@@ -305,6 +308,10 @@ def process_sla(
     total_hours_month = float(days_in_month * 24)
     month_name = calendar.month_name[month]
 
+    # DISPLAY MONTH for notes (as requested): "December-2025"
+    month_display = f"{month_name}-{year}"
+    month_display_short = f"{month_name[:3]}-{year}"
+
     vendor_tag = sanitize_filename(vendor_name)
     month_tag2 = sanitize_filename(sla_month_text)
 
@@ -330,7 +337,7 @@ def process_sla(
     faults["Route_Name_raw"] = faults["Working Route Name as per Transnet"].astype(str)
     faults["Route_Name_norm"] = faults["Route_Name_raw"].apply(norm_route_name)
 
-    # Exemption column detection (supports your long header)
+    # Exemption column detection
     exempt_col = find_exemption_column(faults.columns)
     if exempt_col is None:
         faults["Is_Exempt"] = False
@@ -395,7 +402,7 @@ def process_sla(
     downtime_all = faults_valid.groupby("Route_ID_Final")["Duration_Hrs"].sum().reset_index()
     downtime_all.rename(columns={"Route_ID_Final": "Route_ID", "Duration_Hrs": "Downtime_Hrs_Total"}, inplace=True)
 
-    faults_net = faults_valid[~faults_valid["Is_Exempt"]].copy()  # EXEMPT faults removed from NET downtime
+    faults_net = faults_valid[~faults_valid["Is_Exempt"]].copy()
     downtime_net = faults_net.groupby("Route_ID_Final")["Duration_Hrs"].sum().reset_index()
     downtime_net.rename(columns={"Route_ID_Final": "Route_ID", "Duration_Hrs": "Downtime_Hrs_Net"}, inplace=True)
 
@@ -479,6 +486,9 @@ def process_sla(
         it_tds = round(vendor_basic_used * tds_rate, 0)
         it_tds_rate_text = f"{int(tds_rate*100)}% based on PAN 4th digit '{str(pan4).strip().upper()}'"
 
+    total_statutory = round(gst_tds + it_tds, 0)
+    net_before_penalty_and_vipa = round(total_invoice_vendor - total_statutory, 2)
+
     vipa_base = 1000.0 if vendor_basic_used > 500000 else 500.0
     vipa_gst = round(vipa_base * 0.18, 2)
     vipa_total = round(vipa_base + vipa_gst, 2)
@@ -505,14 +515,16 @@ def process_sla(
 
     header_info = f"""BA: {ba_name}
 OA: {oa_name}
-SLA Month: {sla_month_text}
+SLA Month: {month_display}
 Name of Maintenance Agency: {vendor_name}
 """
 
-    # ---------- Accounts Note ----------
+    # ============================================================
+    # Accounts Note TXT (UPDATED ONLY)
+    # ============================================================
     accounts_note = f"""OFFICE NOTE
 
-Subject: Verification of SLA Bill for {sla_month_text}
+Subject: Verification of SLA Bill for {month_display}
 
 {header_info}
 
@@ -522,54 +534,79 @@ Subject: Verification of SLA Bill for {sla_month_text}
 2) Rate as per Agreement / GeM:
    Rate = Rs. {rate_per_km:,.2f} per KM per month
 
+   RKM x Rate ({total_rkm:.2f} x {rate_per_km:,.2f})                 = Rs. {fmt_money(system_basic)}
+
 3) Invoice Value (Accounts purpose):
-   Basic Value (Source: {vendor_basic_source})          = Rs. {fmt_money(vendor_basic_used)}
-   Add: GST @18%                                        = Rs. {fmt_money(gst_on_vendor)}
-   ---------------------------------------------------------------
-   Total Invoice Value                                  = Rs. {fmt_money(total_invoice_vendor)}
+   Basic Value (Source: {vendor_basic_source})                       = Rs. {fmt_money(vendor_basic_used)}
+   Add: GST @18%                                                     = Rs. {fmt_money(gst_on_vendor)}
+   -------------------------------------------------------------------------------
+   Total Invoice Value                                               = Rs. {fmt_money(total_invoice_vendor)}
 
 4) Statutory / Standard Deductions (rounded):
-   GST TDS @2% on Basic                                 = Rs. {fmt_money(gst_tds)}
-   TDS u/s 194C on Basic                                = Rs. {fmt_money(it_tds)}  [{it_tds_rate_text}]
-   VIPA Charges (Auto)                                  = Rs. {fmt_money(vipa_base)}
-   VIPA GST @18%                                        = Rs. {fmt_money(vipa_gst)}
-   VIPA Total                                           = Rs. {fmt_money(vipa_total)}
+   GST TDS @2% on Basic                                              = Rs. {fmt_money(gst_tds)}
+   TDS u/s 194C on Basic                                             = Rs. {fmt_money(it_tds)}  [{it_tds_rate_text}]
+   -------------------------------------------------------------------------------
+   Total Statutory Deduction (GST TDS + 194C TDS)                     = Rs. {fmt_money(total_statutory)}
 
-A) Net payable to vendor (Before Penalty)               = Rs. {fmt_money(net_before_sla)}
+   Net payable before penalty and VIPA (Invoice - Statutory)         = Rs. {fmt_money(net_before_penalty_and_vipa)}
+
+   VIPA Charges (Auto)                                               = Rs. {fmt_money(vipa_base)}
+   VIPA GST @18%                                                     = Rs. {fmt_money(vipa_gst)}
+   VIPA Total                                                        = Rs. {fmt_money(vipa_total)}
+
+A) Net payable to vendor (Before Penalty)  (Net before penalty - VIPA)= Rs. {fmt_money(net_before_sla)}
 
 5) SLA Penalty Deduction (as per tender):
-   MTTR Penalty (Net after exemption & 25% cap)         = Rs. {fmt_money(mttr_net_after_cap)}   (Cap Applied: {mttr_cap_applied})
-   Availability Penalty (Net)                           = Rs. {fmt_money(availability_penalty_net)}
-   ---------------------------------------------------------------
-   System SLA Deduction (Net)                            = Rs. {fmt_money(system_sla_penalty_net)}
+   MTTR Penalty (Net after exemption & 25% cap)                      = Rs. {fmt_money(mttr_net_after_cap)}   (Cap Applied: {mttr_cap_applied})
+   Availability Penalty (Net)                                        = Rs. {fmt_money(availability_penalty_net)}
+   -------------------------------------------------------------------------------
+   System SLA Deduction (Net)                                        = Rs. {fmt_money(system_sla_penalty_net)}
 
-   Penalty as per Field Unit / SES (Info)               = Rs. {fmt_money(field_unit_penalty)}
-   Adopted Penalty (Higher of above)                    = Rs. {fmt_money(higher_of_penalty)}
+   Penalty as per Field Unit / SES (Info)                            = Rs. {fmt_money(field_unit_penalty)}
+   Adopted Penalty (Higher of above)                                 = Rs. {fmt_money(higher_of_penalty)}
 
-   Vendor already deducted SLA penalty (if any)         = Rs. {fmt_money(vendor_deducted_penalty)}
-   Net SLA recovery after vendor deduction              = Rs. {fmt_money(sla_recovery_after_vendor)}
+   Vendor already deducted SLA penalty (if any)                      = Rs. {fmt_money(vendor_deducted_penalty)}
+   Net SLA recovery after vendor deduction                           = Rs. {fmt_money(sla_recovery_after_vendor)}
 
 6) Manual Penalties / Recoveries:
-   Splice loss per fiber                                = Rs. {fmt_money(splice_loss_amt)}
-   Absence of Supervisor @1500/day                       = Rs. {fmt_money(supervisor_abs_amt)}
-   Absence of FRT @5000/day                              = Rs. {fmt_money(frt_abs_amt)}
-   Absence of Petroller @500/day                         = Rs. {fmt_money(petroller_abs_amt)}
-   Penalty for 1% Re-laying work not done @200000/KM     = Rs. {fmt_money(relaying_not_done_amt)}
-   Any other recovery                                    = Rs. {fmt_money(other_recovery)}
-   ---------------------------------------------------------------
-   Total Manual Penalties/Recoveries                      = Rs. {fmt_money(manual_penalties_accounts)}
+   Splice loss per fiber                                             = Rs. {fmt_money(splice_loss_amt)}
+   Absence of Supervisor @1500/day                                   = Rs. {fmt_money(supervisor_abs_amt)}
+   Absence of FRT @5000/day                                          = Rs. {fmt_money(frt_abs_amt)}
+   Absence of Petroller @500/day                                     = Rs. {fmt_money(petroller_abs_amt)}
+   Penalty for 1% Re-laying work not done @200000/KM                 = Rs. {fmt_money(relaying_not_done_amt)}
+   Any other recovery                                                = Rs. {fmt_money(other_recovery)}
+   -------------------------------------------------------------------------------
+   Total Manual Penalties/Recoveries                                 = Rs. {fmt_money(manual_penalties_accounts)}
 
-B) Total Deductions (SLA + Manual)                      = Rs. {fmt_money(total_deductions_accounts)}
+B) Total Deductions (SLA + Manual)                                   = Rs. {fmt_money(total_deductions_accounts)}
 
-Net Payable to Vendor (A - B)                           = Rs. {fmt_money(net_payable_after_all)}
+Net Payable to Vendor (A - B)                                        = Rs. {fmt_money(net_payable_after_all)}
 
 7) Route mapping remarks:
 {chr(10).join(missing_lines)}
 
+It is submitted that the vendor's submitted invoice has undergone
+verification against the APO and the corresponding material or service
+delivery.
+All penalties are in strict accordance with the stipulated terms and
+conditions outlined in the respective purchase order or tender.
+It is confirmed that the deductions made, whether statutory or related to
+penalties are in full compliance with the provisions set forth in the
+purchase order.
+
+The following documents have been verified and uploaded with MIRO
+transaction.
+1. Invoice along with supporting documents.
+2. All other documents attached by user unit in SES (pl go through it)
+
+Bill put up for approval please.
+
 Submitted for approval.
 """
 
-    # ---------- Clause 14.1 Technical Note (Aligned Tables + Availability details) ----------
+    # ============================================================
+    # Clause 14.1 TXT (UPDATED ONLY)
+    # ============================================================
     slab_map = {
         "≤4": "Upto 4 Hrs",
         ">4–6": "Between 4 Hrs to 6 Hrs",
@@ -627,6 +664,13 @@ Submitted for approval.
 
 {header_info}
 
+Total of RKM as per Annexure A= _____________
+
+Rate as per Tender Rs._________Per KM Monthly.
+
+Total Value of  service Rs. RKM*RATE
+
+
 1. SPLICE LOSS PER FIBER Rs.                                   : Rs. {fmt_money(splice_loss_amt)}
 
 2. MTTR FAULTS Penalty Details                                  : (Code generated from Format-C)
@@ -650,6 +694,19 @@ Submitted for approval.
 7. Penalty for 1% Re-laying ofc Work not done @ 200000 Per KM Rs.  : Rs. {fmt_money(relaying_not_done_amt)}
 
 Total Penalty (1+2+3+4+5+6+7) Rs.                                  : Rs. {fmt_money(total_penalty_clause14)}
+
+It is hereby submitted that the vendor's services for the month of [{month_display_short}] have undergone
+full verification against the Advance Purchase Order (APO) and the corresponding proof of delivery for materials/services.
+
+It is further confirmed that any applicable penalties and deductions have been
+calculated and applied in strict accordance with the stipulated terms and conditions
+outlined in the respective purchase order, APO, or tender document.
+
+The supporting documents listed below have been verified
+and uploaded under SAP Service Entry Sheet No: Leave blank space  here.
+
+1. Excel file of Annexure A
+2. Excel file of Annexure C
 
 Submitted for approval please.
 """
