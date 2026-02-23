@@ -1,10 +1,11 @@
 # ============================================================
 # BSNL SLA BILL CHECKER - LOGIC ONLY (FOR STREAMLIT CLOUD / WEB)
 # Same logic as Desktop V4.2
-# Changes:
+# Changes (ONLY notes + month parse + relaying retention option):
 # 1) Month parsing FIX (supports Timestamp / YYYY-MM-DD)
-# 2) Accounts Note TXT: final approved format (no placeholder)
+# 2) Accounts Note TXT: final approved format
 # 3) Penalty Clause 14.1 TXT: includes RKM, Rate, Total service value + SES blank line
+# 4) NEW: 1% Relaying Not Done can be treated as Retention (checkbox from UI)
 # ============================================================
 
 import os
@@ -91,15 +92,6 @@ def parse_duration_to_hours(val):
 
 
 def uptime_deduction_pct(uptime_pct):
-    """
-    Tender slab:
-    100–99% → 0%
-    99–98% → 10%
-    98–97% → 25%
-    97–96% → 50%
-    96–95% → 75%
-    Below 95% → 100%
-    """
     if pd.isna(uptime_pct):
         return 0
     if uptime_pct >= 99:
@@ -142,7 +134,6 @@ def mttr_penalty_non_cumulative(duration_hours):
 
 
 def pan_4th_digit_to_tds_rate(pan4):
-    """Only 4th digit asked: P/H => 1% else 2% ; blank => None"""
     if pan4 is None:
         return None
     s = str(pan4).strip().upper()
@@ -164,10 +155,6 @@ def pick_first_nonblank(series):
 
 
 def detect_fault_duration_column(df):
-    """
-    Prefer header containing 'fault' and 'duration'
-    else fallback to Column N (index 13).
-    """
     cols = list(df.columns)
     for col in cols:
         s = str(col).lower()
@@ -186,10 +173,6 @@ def fmt_money(x):
 
 
 def robust_yes(val) -> bool:
-    """
-    Bulletproof YES parser:
-    Accepts: YES / Y / TRUE / 1 / YES - unavoidable / EXEMPTED etc.
-    """
     if pd.isna(val):
         return False
     s = str(val).strip().upper()
@@ -207,13 +190,7 @@ def robust_yes(val) -> bool:
 
 
 def find_exemption_column(columns):
-    """
-    Enterprise detection:
-    - Any header containing 'exempt' or 'exemption'
-    - Else mttr/availability hint + yes/no hint
-    """
     cols = list(columns)
-
     for col in cols:
         col_norm = str(col).strip().lower()
         if ("exempt" in col_norm) or ("exemption" in col_norm):
@@ -231,12 +208,6 @@ def find_exemption_column(columns):
 
 
 def parse_month_year_from_value(val):
-    """
-    Annexure A Month may be:
-    - text: 'Dec-2025', 'December-2025'
-    - timestamp/date: 2025-12-01 00:00:00
-    - ISO string: '2025-12-01'
-    """
     if val is None or (isinstance(val, float) and np.isnan(val)):
         return None, None
 
@@ -278,6 +249,7 @@ def process_sla(
     frt_abs_amt=0.0,
     petroller_abs_amt=0.0,
     relaying_not_done_amt=0.0,
+    relaying_as_retention=False,   # ✅ NEW
 ):
     # ---------- Read Format A ----------
     a = read_excel_any(annex_a_path, header=0)
@@ -322,8 +294,8 @@ def process_sla(
     total_hours_month = float(days_in_month * 24)
     month_name = calendar.month_name[month]
 
-    month_display = f"{month_name}-{year}"          # December-2025
-    month_display_short = f"{month_name[:3]}-{year}"  # Dec-2025
+    month_display = f"{month_name}-{year}"
+    month_display_short = f"{month_name[:3]}-{year}"
 
     vendor_tag = sanitize_filename(vendor_name)
     month_tag2 = sanitize_filename(month_display)
@@ -351,17 +323,12 @@ def process_sla(
     faults["Route_Name_norm"] = faults["Route_Name_raw"].apply(norm_route_name)
 
     exempt_col = find_exemption_column(faults.columns)
-    if exempt_col is None:
-        faults["Is_Exempt"] = False
-    else:
-        faults["Is_Exempt"] = faults[exempt_col].apply(robust_yes)
-
+    faults["Is_Exempt"] = faults[exempt_col].apply(robust_yes) if exempt_col else False
     faults["Duration_Hrs"] = faults[duration_col].apply(parse_duration_to_hours)
 
     faults_valid = faults[(faults["Duration_Hrs"].notna()) & (faults["Duration_Hrs"] > 0)].copy()
     faults_invalid = faults[~((faults["Duration_Hrs"].notna()) & (faults["Duration_Hrs"] > 0))].copy()
 
-    # Mapping ID first then Name
     faults_valid["Route_ID_mapped_by_id"] = faults_valid["Route_ID_raw"].where(faults_valid["Route_ID_raw"].isin(route_ids_in_a))
     faults_valid["Route_ID_mapped_by_name"] = faults_valid["Route_Name_norm"].map(name_to_id)
 
@@ -378,7 +345,7 @@ def process_sla(
 
     faults_valid["Route_Name_Final"] = faults_valid["Route_ID_Final"].map(id_to_name).fillna(faults_valid["Route_Name_raw"])
 
-    # ---------- MTTR penalty per fault ----------
+    # ---------- MTTR penalty ----------
     penalties = faults_valid["Duration_Hrs"].apply(mttr_penalty_non_cumulative)
     faults_valid["MTTR_Penalty_Tender_Rs"] = [p[0] for p in penalties]
     faults_valid["MTTR_Slab"] = [p[1] for p in penalties]
@@ -386,7 +353,6 @@ def process_sla(
     faults_valid["MTTR_Penalty_Exempted_Rs"] = np.where(faults_valid["Is_Exempt"], faults_valid["MTTR_Penalty_Tender_Rs"], 0.0)
     faults_valid["MTTR_Penalty_Net_Rs"] = faults_valid["MTTR_Penalty_Tender_Rs"] - faults_valid["MTTR_Penalty_Exempted_Rs"]
 
-    # ---------- MTTR slab summary ----------
     SLAB_ORDER = ["≤4", ">4–6", ">6–24", ">24–48", ">48"]
     slab_summary = (
         faults_valid.groupby("MTTR_Slab", dropna=False)
@@ -477,7 +443,7 @@ def process_sla(
     vendor_deducted_penalty = float(vendor_deducted_penalty or 0.0)
     sla_recovery_after_vendor = round(max(higher_of_penalty - vendor_deducted_penalty, 0.0), 2)
 
-    # Accounts computations (optional invoice)
+    # ---------- Accounts computations ----------
     total_rkm = round(float(routes["Route_KM"].sum()), 2)
     system_basic = round(total_basic_sla, 2)
 
@@ -509,6 +475,7 @@ def process_sla(
 
     net_before_sla = round(total_invoice_vendor - gst_tds - it_tds - vipa_total, 2)
 
+    # ---------- Manual inputs ----------
     splice_loss_amt = float(splice_loss_amt or 0.0)
     supervisor_abs_amt = float(supervisor_abs_amt or 0.0)
     frt_abs_amt = float(frt_abs_amt or 0.0)
@@ -516,16 +483,24 @@ def process_sla(
     relaying_not_done_amt = float(relaying_not_done_amt or 0.0)
     other_recovery = float(other_recovery or 0.0)
 
+    # ✅ NEW: Relaying split between Penalty vs Retention (display only; deduction same)
+    relaying_penalty_amt = 0.0 if relaying_as_retention else relaying_not_done_amt
+    relaying_retention_amt = relaying_not_done_amt if relaying_as_retention else 0.0
+
+    # Clause 14 total penalty should NOT include relaying if treated as retention
     total_penalty_clause14 = round(
         splice_loss_amt + mttr_net_after_cap + availability_penalty_net +
-        supervisor_abs_amt + frt_abs_amt + petroller_abs_amt + relaying_not_done_amt, 2
+        supervisor_abs_amt + frt_abs_amt + petroller_abs_amt + relaying_penalty_amt, 2
     )
 
+    # Accounts manual penalties include relaying only if penalty; retention shown separately
     manual_penalties_accounts = round(
-        splice_loss_amt + supervisor_abs_amt + frt_abs_amt + petroller_abs_amt +
-        relaying_not_done_amt + other_recovery, 2
+        splice_loss_amt + supervisor_abs_amt + frt_abs_amt + petroller_abs_amt + relaying_penalty_amt + other_recovery, 2
     )
-    total_deductions_accounts = round(sla_recovery_after_vendor + manual_penalties_accounts, 2)
+
+    # Total deductions from bill must include BOTH penalty and retention
+    total_deductions_accounts = round(sla_recovery_after_vendor + manual_penalties_accounts + relaying_retention_amt, 2)
+
     net_payable_after_all = round(net_before_sla - total_deductions_accounts, 2)
 
     header_info = f"""BA: {ba_name}
@@ -535,8 +510,22 @@ Name of Maintenance Agency: {vendor_name}
 """
 
     # ============================================================
-    # Accounts Note TXT (FINAL)
+    # Accounts Note TXT (FINAL + Retention option)
     # ============================================================
+    relaying_line_accounts = (
+        f"   Retention for 1% Re-laying work not done @200000/KM          = Rs. {fmt_money(relaying_retention_amt)}"
+        if relaying_as_retention else
+        f"   Penalty for 1% Re-laying work not done @200000/KM             = Rs. {fmt_money(relaying_penalty_amt)}"
+    )
+
+    retention_block_accounts = ""
+    if relaying_as_retention and relaying_retention_amt > 0:
+        retention_block_accounts = f"""
+7) Retention:
+{relaying_line_accounts}
+
+"""
+
     accounts_note = f"""OFFICE NOTE
 
 Subject: Verification of SLA Bill for {month_display}
@@ -591,16 +580,16 @@ A) Net payable to vendor (Before Penalty)                          = Rs. {fmt_mo
    Absence of Supervisor @1500/day                                 = Rs. {fmt_money(supervisor_abs_amt)}
    Absence of FRT @5000/day                                        = Rs. {fmt_money(frt_abs_amt)}
    Absence of Petroller @500/day                                   = Rs. {fmt_money(petroller_abs_amt)}
-   Penalty for 1% Re-laying work not done @200000/KM               = Rs. {fmt_money(relaying_not_done_amt)}
+{relaying_line_accounts}
    Any other recovery                                              = Rs. {fmt_money(other_recovery)}
    -------------------------------------------------------------------------------
    Total Manual Penalties/Recoveries                               = Rs. {fmt_money(manual_penalties_accounts)}
-
-B) Total Deductions (SLA + Manual)                                 = Rs. {fmt_money(total_deductions_accounts)}
+{retention_block_accounts}
+B) Total Deductions (SLA + Manual + Retention)                     = Rs. {fmt_money(total_deductions_accounts)}
 
 Net Payable to Vendor (A - B)                                      = Rs. {fmt_money(net_payable_after_all)}
 
-7) Route mapping remarks:
+8) Route mapping remarks:
 {chr(10).join(missing_lines)}
 
 It is submitted that the vendor's submitted invoice has undergone
@@ -611,7 +600,7 @@ All penalties are in strict accordance with the stipulated terms and
 conditions outlined in the respective purchase order or tender.
 
 It is confirmed that the deductions made, whether statutory or related to
-penalties are in full compliance with the provisions set forth in the
+penalties/retention are in full compliance with the provisions set forth in the
 purchase order.
 
 The following documents have been verified and uploaded with MIRO transaction:
@@ -624,7 +613,7 @@ Submitted for approval.
 """
 
     # ============================================================
-    # Clause 14.1 Technical Note (Penalty Note)
+    # Clause 14.1 Technical Note (Penalty Note + Retention option)
     # ============================================================
     slab_map = {
         "≤4": "Upto 4 Hrs",
@@ -679,6 +668,14 @@ Submitted for approval.
                 f"{fmt_money(rr['Availability_Deduction_Net_Rs']):>14}"
             )
 
+    relaying_line_penalty_note = (
+        f"7. Retention for 1% Re-laying ofc Work not done @ 200000 Per KM Rs.  : Rs. {fmt_money(relaying_retention_amt)}"
+        if relaying_as_retention else
+        f"7. Penalty for 1% Re-laying ofc Work not done @ 200000 Per KM Rs.    : Rs. {fmt_money(relaying_penalty_amt)}"
+    )
+
+    total_deduction_penalty_note = round(total_penalty_clause14 + relaying_retention_amt, 2)
+
     technical_note_clause14 = f"""SLA PENALTIES CALCULATION AS PER TENDER CLAUSE 14.1
 
 {header_info}
@@ -711,14 +708,15 @@ Penalty Details given below:-
 4. Absense of Supervisor @ 1500 per day Rs.                       : Rs. {fmt_money(supervisor_abs_amt)}
 5. Absence of FRT @ 5000 Per day Rs.                              : Rs. {fmt_money(frt_abs_amt)}
 6. Absence of Petroller @ 500 Per day Rs.                         : Rs. {fmt_money(petroller_abs_amt)}
-7. Penalty for 1% Re-laying ofc Work not done @ 200000 Per KM Rs.  : Rs. {fmt_money(relaying_not_done_amt)}
+{relaying_line_penalty_note}
 
-Total Penalty (1+2+3+4+5+6+7) Rs.                                  : Rs. {fmt_money(total_penalty_clause14)}
+Total Penalty (1+2+3+4+5+6) Rs.                                   : Rs. {fmt_money(total_penalty_clause14)}
+Total Deduction (Penalty + Retention if any) Rs.                  : Rs. {fmt_money(total_deduction_penalty_note)}
 
 It is hereby submitted that the vendor's services for the month of [{month_display_short}] have undergone
 full verification against the Advance Purchase Order (APO) and the corresponding proof of delivery for materials/services.
 
-It is further confirmed that any applicable penalties and deductions have been
+It is further confirmed that any applicable penalties/retention and deductions have been
 calculated and applied in strict accordance with the stipulated terms and conditions
 outlined in the respective purchase order, APO, or tender document.
 
@@ -737,15 +735,16 @@ Submitted for approval please.
     out_accounts_txt = os.path.join(save_dir, f"SAP_Accounts_Note_{vendor_tag}_{month_tag2}.txt")
     out_tech_txt = os.path.join(save_dir, f"Penalty_Clause14_1_{vendor_tag}_{month_tag2}.txt")
 
+    # Excel output stays same
     summary = pd.DataFrame([
         ["BA", ba_name],
         ["OA", oa_name],
         ["Vendor", vendor_name],
-        ["SLA Month (Format-A)", str(sla_month_raw)],
+        ["SLA Month (Format-A raw)", str(sla_month_raw)],
         ["Month used for days calculation", f"{month_name} {year} ({days_in_month} days)"],
-        ["Total RKM", round(float(routes["Route_KM"].sum()), 2)],
+        ["Total RKM", total_rkm],
         ["Rate per KM", rate_per_km],
-        ["Total Basic SLA (Σ RKM×Rate)", round(float(routes['SLA_Charges_Rs'].sum()), 2)],
+        ["Total Basic SLA (Σ RKM×Rate)", round(float(routes["SLA_Charges_Rs"].sum()), 2)],
         ["MTTR cap 25%", mttr_cap_25pct],
         ["MTTR cap applied", mttr_cap_applied],
         ["MTTR net after cap", mttr_net_after_cap],
@@ -755,7 +754,9 @@ Submitted for approval please.
         ["Higher-of adopted penalty", higher_of_penalty],
         ["Vendor already deducted SLA penalty", vendor_deducted_penalty],
         ["Net SLA recovery after vendor deduction", sla_recovery_after_vendor],
-        ["Clause 14.1 total penalty", total_penalty_clause14],
+        ["Clause 14.1 penalty total (excluding retention)", total_penalty_clause14],
+        ["Relaying treated as retention", "YES" if relaying_as_retention else "NO"],
+        ["Relaying retention amount", relaying_retention_amt],
         ["Valid faults count", len(faults_valid)],
         ["Exempt faults count", int(faults_valid["Is_Exempt"].sum())],
         ["Invalid duration rows", len(faults_invalid)],
@@ -768,7 +769,6 @@ Submitted for approval please.
         faults_valid.to_excel(writer, sheet_name="MTTR_Fault_Report", index=False)
         slab_summary.to_excel(writer, sheet_name="MTTR_Slab_Summary", index=False)
         summary.to_excel(writer, sheet_name="Summary", index=False)
-
         if len(faults_invalid) > 0:
             faults_invalid.to_excel(writer, sheet_name="Invalid_Fault_Rows", index=False)
 
