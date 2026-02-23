@@ -8,7 +8,7 @@ import pandas as pd
 
 from sla_logic import process_sla
 
-st.set_page_config(page_title="BSNL SLA Bill Checker", layout="wide")
+st.set_page_config(page_title="SLA Bill Checker", layout="wide")
 
 
 def clear_form():
@@ -27,9 +27,9 @@ def clear_form():
 st.markdown(
     """
     <div style="padding:8px 0;">
-      <div style="font-size:28px; font-weight:800; color:#0b2d6b;">BSNL SLA Bill Checker</div>
+      <div style="font-size:28px; font-weight:800; color:#0b2d6b;">SLA Bill Checker</div>
       <div style="font-size:14px; font-weight:700; margin-top:2px;">
-        Created by: Hrushikesh Kesale | MH Circle BSNL
+        Created by: Hrushikesh Kesale | MH Circle 
       </div>
       <div style="font-size:12px; color:#666; margin-top:6px;">
         Upload Annexure A & Annexure C → Generate Excel + Accounts Note + Clause 14.1 Penalty Note
@@ -163,3 +163,4 @@ if submitted:
                 file_name="SLA_Output_Files.zip",
                 mime="application/zip"
             )
+
