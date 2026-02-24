@@ -1,11 +1,12 @@
 # ============================================================
 # BSNL SLA BILL CHECKER - LOGIC ONLY (FOR STREAMLIT CLOUD / WEB)
 # Same logic as Desktop V4.2
-# Changes (ONLY notes + month parse + relaying retention option):
+# Changes (ONLY notes + month parse + relaying retention option + MTTR export cleanup):
 # 1) Month parsing FIX (supports Timestamp / YYYY-MM-DD)
 # 2) Accounts Note TXT: final approved format
 # 3) Penalty Clause 14.1 TXT: includes RKM, Rate, Total service value + SES blank line
-# 4) NEW: 1% Relaying Not Done can be treated as Retention (checkbox from UI)
+# 4) 1% Relaying Not Done can be treated as Retention (checkbox from UI)
+# 5) MTTR_Fault_Report: remove blank columns + add "Route Missing in A"
 # ============================================================
 
 import os
@@ -249,7 +250,7 @@ def process_sla(
     frt_abs_amt=0.0,
     petroller_abs_amt=0.0,
     relaying_not_done_amt=0.0,
-    relaying_as_retention=False,   # ✅ NEW
+    relaying_as_retention=False,
 ):
     # ---------- Read Format A ----------
     a = read_excel_any(annex_a_path, header=0)
@@ -329,6 +330,7 @@ def process_sla(
     faults_valid = faults[(faults["Duration_Hrs"].notna()) & (faults["Duration_Hrs"] > 0)].copy()
     faults_invalid = faults[~((faults["Duration_Hrs"].notna()) & (faults["Duration_Hrs"] > 0))].copy()
 
+    # Mapping ID first then Name
     faults_valid["Route_ID_mapped_by_id"] = faults_valid["Route_ID_raw"].where(faults_valid["Route_ID_raw"].isin(route_ids_in_a))
     faults_valid["Route_ID_mapped_by_name"] = faults_valid["Route_Name_norm"].map(name_to_id)
 
@@ -404,7 +406,7 @@ def process_sla(
 
     availability_penalty_net = round(float(avail["Availability_Deduction_Net_Rs"].sum()), 2)
 
-    # ---------- Missing routes ----------
+    # ---------- Missing routes (for notes) ----------
     missing_mask = (~faults_valid["Route_ID_Final"].isin(route_ids_in_a)) & (~faults_valid["Route_Name_norm"].isin(route_names_in_a))
     missing_rows = faults_valid[missing_mask].copy()
     missing_group = pd.DataFrame()
@@ -483,24 +485,21 @@ def process_sla(
     relaying_not_done_amt = float(relaying_not_done_amt or 0.0)
     other_recovery = float(other_recovery or 0.0)
 
-    # ✅ NEW: Relaying split between Penalty vs Retention (display only; deduction same)
+    # Relaying split: display only (deduction same)
     relaying_penalty_amt = 0.0 if relaying_as_retention else relaying_not_done_amt
     relaying_retention_amt = relaying_not_done_amt if relaying_as_retention else 0.0
 
-    # Clause 14 total penalty should NOT include relaying if treated as retention
     total_penalty_clause14 = round(
         splice_loss_amt + mttr_net_after_cap + availability_penalty_net +
         supervisor_abs_amt + frt_abs_amt + petroller_abs_amt + relaying_penalty_amt, 2
     )
 
-    # Accounts manual penalties include relaying only if penalty; retention shown separately
     manual_penalties_accounts = round(
         splice_loss_amt + supervisor_abs_amt + frt_abs_amt + petroller_abs_amt + relaying_penalty_amt + other_recovery, 2
     )
 
-    # Total deductions from bill must include BOTH penalty and retention
+    # Total deductions from bill include penalty + retention
     total_deductions_accounts = round(sla_recovery_after_vendor + manual_penalties_accounts + relaying_retention_amt, 2)
-
     net_payable_after_all = round(net_before_sla - total_deductions_accounts, 2)
 
     header_info = f"""BA: {ba_name}
@@ -510,7 +509,7 @@ Name of Maintenance Agency: {vendor_name}
 """
 
     # ============================================================
-    # Accounts Note TXT (FINAL + Retention option)
+    # Accounts Note TXT
     # ============================================================
     relaying_line_accounts = (
         f"   Retention for 1% Re-laying work not done @200000/KM          = Rs. {fmt_money(relaying_retention_amt)}"
@@ -592,17 +591,6 @@ Net Payable to Vendor (A - B)                                      = Rs. {fmt_mo
 8) Route mapping remarks:
 {chr(10).join(missing_lines)}
 
-It is submitted that the vendor's submitted invoice has undergone
-verification against the APO and the corresponding material or service
-delivery.
-
-All penalties are in strict accordance with the stipulated terms and
-conditions outlined in the respective purchase order or tender.
-
-It is confirmed that the deductions made, whether statutory or related to
-penalties/retention are in full compliance with the provisions set forth in the
-purchase order.
-
 The following documents have been verified and uploaded with MIRO transaction:
 1. Invoice along with supporting documents.
 2. All other documents attached by user unit in SES (pl go through it)
@@ -613,7 +601,7 @@ Submitted for approval.
 """
 
     # ============================================================
-    # Clause 14.1 Technical Note (Penalty Note + Retention option)
+    # Clause 14.1 Technical Note (Penalty Note)
     # ============================================================
     slab_map = {
         "≤4": "Upto 4 Hrs",
@@ -713,13 +701,6 @@ Penalty Details given below:-
 Total Penalty (1+2+3+4+5+6) Rs.                                   : Rs. {fmt_money(total_penalty_clause14)}
 Total Deduction (Penalty + Retention if any) Rs.                  : Rs. {fmt_money(total_deduction_penalty_note)}
 
-It is hereby submitted that the vendor's services for the month of [{month_display_short}] have undergone
-full verification against the Advance Purchase Order (APO) and the corresponding proof of delivery for materials/services.
-
-It is further confirmed that any applicable penalties/retention and deductions have been
-calculated and applied in strict accordance with the stipulated terms and conditions
-outlined in the respective purchase order, APO, or tender document.
-
 The supporting documents listed below have been verified
 and uploaded under SAP Service Entry Sheet No: ______________
 
@@ -735,7 +716,6 @@ Submitted for approval please.
     out_accounts_txt = os.path.join(save_dir, f"SAP_Accounts_Note_{vendor_tag}_{month_tag2}.txt")
     out_tech_txt = os.path.join(save_dir, f"Penalty_Clause14_1_{vendor_tag}_{month_tag2}.txt")
 
-    # Excel output stays same
     summary = pd.DataFrame([
         ["BA", ba_name],
         ["OA", oa_name],
@@ -766,9 +746,41 @@ Submitted for approval please.
 
     with pd.ExcelWriter(out_xlsx, engine="openpyxl") as writer:
         avail.sort_values(["Route_ID"]).to_excel(writer, sheet_name="Availability_Report", index=False)
-        faults_valid.to_excel(writer, sheet_name="MTTR_Fault_Report", index=False)
+
+        # ✅ MTTR_Fault_Report CLEAN EXPORT + NEW COLUMN
+        mttr_export = faults_valid.copy()
+        mttr_export["Route Missing in A"] = np.where(
+            mttr_export["Route_ID_Final"].isin(route_ids_in_a),
+            "NO",
+            "YES"
+        )
+
+        # remove internal helper columns (keep user-facing columns clean)
+        drop_cols = [
+            "Route_ID_mapped_by_id",
+            "Route_ID_mapped_by_name",
+            "Route_ID_Final",
+            "Route_Name_norm",
+        ]
+        for col in drop_cols:
+            if col in mttr_export.columns:
+                mttr_export.drop(columns=col, inplace=True)
+
+        # drop fully blank columns (this removes your S→AE blank block)
+        mttr_export = mttr_export.dropna(axis=1, how="all")
+
+        # keep "Route Missing in A" at end
+        cols = list(mttr_export.columns)
+        if "Route Missing in A" in cols:
+            cols.remove("Route Missing in A")
+            cols.append("Route Missing in A")
+            mttr_export = mttr_export[cols]
+
+        mttr_export.to_excel(writer, sheet_name="MTTR_Fault_Report", index=False)
+
         slab_summary.to_excel(writer, sheet_name="MTTR_Slab_Summary", index=False)
         summary.to_excel(writer, sheet_name="Summary", index=False)
+
         if len(faults_invalid) > 0:
             faults_invalid.to_excel(writer, sheet_name="Invalid_Fault_Rows", index=False)
 
