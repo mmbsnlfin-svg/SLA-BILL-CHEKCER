@@ -7,6 +7,7 @@
 # 3) Penalty Clause 14.1 TXT: includes RKM, Rate, Total service value + SES blank line
 # 4) 1% Relaying Not Done can be treated as Retention (checkbox from UI)
 # 5) MTTR_Fault_Report: remove blank columns + add "Route Missing in A"
+# 6) NEW: Route wise Fault Count Details table under Availability section in penalty note
 # ============================================================
 
 import os
@@ -109,14 +110,6 @@ def uptime_deduction_pct(uptime_pct):
 
 
 def mttr_penalty_non_cumulative(duration_hours):
-    """
-    NON-cumulative slabs (rounded UP to full hour):
-    <=4 : 0
-    >4-6 : 500
-    >6-24 : 500 + 100/hour beyond 6 (rounded hours)
-    >24-48 : 5000
-    >48 : 5000 + 500/day beyond 48 (ceil days)
-    """
     if pd.isna(duration_hours) or duration_hours <= 0:
         return 0, "Invalid/Blank"
 
@@ -485,7 +478,6 @@ def process_sla(
     relaying_not_done_amt = float(relaying_not_done_amt or 0.0)
     other_recovery = float(other_recovery or 0.0)
 
-    # Relaying split: display only (deduction same)
     relaying_penalty_amt = 0.0 if relaying_as_retention else relaying_not_done_amt
     relaying_retention_amt = relaying_not_done_amt if relaying_as_retention else 0.0
 
@@ -498,7 +490,6 @@ def process_sla(
         splice_loss_amt + supervisor_abs_amt + frt_abs_amt + petroller_abs_amt + relaying_penalty_amt + other_recovery, 2
     )
 
-    # Total deductions from bill include penalty + retention
     total_deductions_accounts = round(sla_recovery_after_vendor + manual_penalties_accounts + relaying_retention_amt, 2)
     net_payable_after_all = round(net_before_sla - total_deductions_accounts, 2)
 
@@ -509,7 +500,7 @@ Name of Maintenance Agency: {vendor_name}
 """
 
     # ============================================================
-    # Accounts Note TXT
+    # Accounts Note TXT (unchanged logic)
     # ============================================================
     relaying_line_accounts = (
         f"   Retention for 1% Re-laying work not done @200000/KM          = Rs. {fmt_money(relaying_retention_amt)}"
@@ -656,6 +647,38 @@ Submitted for approval.
                 f"{fmt_money(rr['Availability_Deduction_Net_Rs']):>14}"
             )
 
+    # ✅ NEW: Route wise Fault Count Details table
+    fault_count_df = (
+        faults_valid.groupby("Route_ID_Final")
+        .size()
+        .reset_index(name="Total_Fault_Count")
+        .rename(columns={"Route_ID_Final": "Route_ID"})
+    )
+    fault_count_df = fault_count_df.merge(
+        avail_view[["Route_ID", "Route_Name", "Uptime_pct_Net"]],
+        on="Route_ID",
+        how="left"
+    )
+    fault_count_df["Route_Name"] = fault_count_df["Route_Name"].fillna("")
+    fault_count_df["Uptime_pct_Net"] = pd.to_numeric(fault_count_df["Uptime_pct_Net"], errors="coerce").fillna(0.0)
+    fault_count_df["Total_Fault_Count"] = pd.to_numeric(fault_count_df["Total_Fault_Count"], errors="coerce").fillna(0).astype(int)
+    fault_count_df = fault_count_df.sort_values(["Total_Fault_Count", "Uptime_pct_Net"], ascending=[False, True])
+
+    fc_header = f"{'Route ID':<18} {'Route Name':<55} {'Total Fault count':>18} {'Uptime%':>10}"
+    fc_sep = "-" * len(fc_header)
+    fc_lines = [fc_header, fc_sep]
+
+    total_faults_all_routes = int(fault_count_df["Total_Fault_Count"].sum())
+    for _, rr in fault_count_df.iterrows():
+        rid = str(rr["Route_ID"])[:18]
+        rname = str(rr["Route_Name"])[:55]
+        cnt = int(rr["Total_Fault_Count"])
+        up = float(rr["Uptime_pct_Net"])
+        fc_lines.append(f"{rid:<18} {rname:<55} {cnt:>18} {up:>10.2f}")
+
+    fc_lines.append(fc_sep)
+    fc_lines.append(f"{'Total =':<75} {total_faults_all_routes}")
+
     relaying_line_penalty_note = (
         f"7. Retention for 1% Re-laying ofc Work not done @ 200000 Per KM Rs.  : Rs. {fmt_money(relaying_retention_amt)}"
         if relaying_as_retention else
@@ -692,6 +715,9 @@ Penalty Details given below:-
 
    Availability details (Net):
 {chr(10).join(av_lines)}
+
+   Route wise Fault Count Details
+{chr(10).join(fc_lines)}
 
 4. Absense of Supervisor @ 1500 per day Rs.                       : Rs. {fmt_money(supervisor_abs_amt)}
 5. Absence of FRT @ 5000 Per day Rs.                              : Rs. {fmt_money(frt_abs_amt)}
@@ -755,7 +781,6 @@ Submitted for approval please.
             "YES"
         )
 
-        # remove internal helper columns (keep user-facing columns clean)
         drop_cols = [
             "Route_ID_mapped_by_id",
             "Route_ID_mapped_by_name",
@@ -766,10 +791,8 @@ Submitted for approval please.
             if col in mttr_export.columns:
                 mttr_export.drop(columns=col, inplace=True)
 
-        # drop fully blank columns (this removes your S→AE blank block)
         mttr_export = mttr_export.dropna(axis=1, how="all")
 
-        # keep "Route Missing in A" at end
         cols = list(mttr_export.columns)
         if "Route Missing in A" in cols:
             cols.remove("Route Missing in A")
