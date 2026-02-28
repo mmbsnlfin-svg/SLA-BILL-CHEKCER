@@ -10,6 +10,18 @@ from sla_logic import process_sla
 
 st.set_page_config(page_title="BSNL SLA Bill Checker", layout="wide")
 
+# -----------------------------
+# Expected headers (EXACT)
+# -----------------------------
+REQUIRED_A = [
+    "FORMAT", "BA", "OA", "Month", "Sr.No.",
+    "Transnet Route ID", "Working Route Name as per Transnet",
+    "RKM", "Name of Maintenance Agency"
+]
+REQUIRED_C = [
+    "Transnet Route ID", "Working Route Name as per Transnet"
+]
+
 
 def clear_form():
     keys = [
@@ -22,6 +34,35 @@ def clear_form():
     for k in keys:
         if k in st.session_state:
             del st.session_state[k]
+
+
+def normalize_cols(cols):
+    out = []
+    for c in cols:
+        s = str(c).strip()
+        s = " ".join(s.split())
+        out.append(s)
+    return out
+
+
+def classify_file(columns_list):
+    cols = set(columns_list)
+    has_a = all(c in cols for c in REQUIRED_A)
+    has_c = all(c in cols for c in REQUIRED_C)
+
+    if has_a and not has_c:
+        return "A"
+    if has_c and not has_a:
+        return "C"
+    if has_a and has_c:
+        # Rare: a merged/combined file. Treat as A safely.
+        return "A"
+    return "UNKNOWN"
+
+
+def missing_columns(columns_list, required_list):
+    cols = set(columns_list)
+    return [c for c in required_list if c not in cols]
 
 
 st.markdown(
@@ -130,6 +171,68 @@ if submitted:
             with open(c_path, "wb") as f:
                 f.write(annex_c.getbuffer())
 
+            # -----------------------------
+            # ✅ NEW: Validate wrong upload / header deviation
+            # -----------------------------
+            try:
+                a_prev = pd.read_excel(a_path, nrows=1)
+                c_prev = pd.read_excel(c_path, nrows=1)
+
+                a_cols = normalize_cols(a_prev.columns)
+                c_cols = normalize_cols(c_prev.columns)
+
+                a_type = classify_file(a_cols)
+                c_type = classify_file(c_cols)
+
+                # swapped detection
+                if a_type == "C" and c_type == "A":
+                    st.error(
+                        "Wrong files uploaded ❌\n\n"
+                        "It looks like you uploaded Annexure C file in Annexure A upload\n"
+                        "and Annexure A file in Annexure C upload.\n\n"
+                        "✅ Please swap the files and upload correctly."
+                    )
+                    st.info("Annexure A upload headers detected:")
+                    st.write(a_cols)
+                    st.info("Annexure C upload headers detected:")
+                    st.write(c_cols)
+                    st.stop()
+
+                # Annexure A header mismatch
+                miss_a = missing_columns(a_cols, REQUIRED_A)
+                if miss_a:
+                    st.error(
+                        "Annexure A (Format-A) column mismatch ❌\n\n"
+                        f"Missing required columns: {miss_a}\n\n"
+                        "Please correct the column names exactly as per standard format."
+                    )
+                    st.info("Expected Annexure A headers (exact):")
+                    st.write(REQUIRED_A)
+                    st.info("Your uploaded Annexure A headers (detected):")
+                    st.write(a_cols)
+                    st.stop()
+
+                # Annexure C header mismatch
+                miss_c = missing_columns(c_cols, REQUIRED_C)
+                if miss_c:
+                    st.error(
+                        "Annexure C (Format-C) column mismatch ❌\n\n"
+                        f"Missing required columns: {miss_c}\n\n"
+                        "Please correct the column names exactly as per standard format."
+                    )
+                    st.info("Expected Annexure C headers (must include these exact):")
+                    st.write(REQUIRED_C)
+                    st.info("Your uploaded Annexure C headers (detected):")
+                    st.write(c_cols)
+                    st.stop()
+
+            except Exception as e:
+                st.error(f"Unable to validate Excel headers. Please check the uploaded files. Error: {e}")
+                st.stop()
+
+            # -----------------------------
+            # Run process
+            # -----------------------------
             out_xlsx, out_acc, out_tech = process_sla(
                 annex_a_path=a_path,
                 annex_c_path=c_path,
