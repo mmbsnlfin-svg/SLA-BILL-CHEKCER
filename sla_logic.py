@@ -75,12 +75,17 @@ def read_excel_any(path, header=0):
 def parse_duration_to_hours(val, number_format=None):
     """
     Accept duration in any of these forms:
-    - decimal hours (e.g. 5.75)
-    - Excel time fraction (e.g. 0.8722 for 20:56:00) -> converts by *24
+    - decimal hours (e.g. 5.75 or 0.95)
     - HH:MM
     - HH:MM:SS
+    - "1 day, 1:36:00"
     - datetime.time / python time object
     - pandas Timedelta / numpy timedelta64
+
+    Important rule:
+    When Excel is read directly with openpyxl, real time/duration cells usually
+    come as time/timedelta objects, while pasted values come as numeric cells.
+    So numeric cells are treated as DECIMAL HOURS and are NOT multiplied by 24.
     """
     if val is None:
         return np.nan
@@ -90,8 +95,6 @@ def parse_duration_to_hours(val, number_format=None):
             return np.nan
     except Exception:
         pass
-
-    fmt = "" if number_format is None else str(number_format).lower()
 
     if isinstance(val, (timedelta, pd.Timedelta)):
         return val.total_seconds() / 3600.0
@@ -105,27 +108,13 @@ def parse_duration_to_hours(val, number_format=None):
     if isinstance(val, time):
         return val.hour + (val.minute / 60.0) + (val.second / 3600.0)
 
+    # Numeric Excel cells are assumed to already be decimal hours.
     if isinstance(val, (int, float, np.integer, np.floating)):
         try:
             num = float(val)
         except Exception:
             return np.nan
-        if np.isnan(num):
-            return np.nan
-
-        # Excel stores time as fraction of a day; decimal hours should remain as-is.
-        # If number format indicates time/duration, always convert by *24.
-        if fmt:
-            fmt_no_brackets = fmt.replace("[h]", "h").replace("[m]", "m").replace("[s]", "s")
-            if any(token in fmt_no_brackets for token in ["h:mm", "hh:mm", "m:ss", "mm:ss", "h:mm:ss", "hh:mm:ss"]):
-                return num * 24.0
-
-        # Heuristic fallback:
-        # if numeric value is between 0 and 1, it is usually an Excel time fraction.
-        if 0 <= num <= 1:
-            return num * 24.0
-
-        return num
+        return np.nan if np.isnan(num) else num
 
     s = str(val).strip()
     if s == "":
@@ -143,10 +132,7 @@ def parse_duration_to_hours(val, number_format=None):
         return td.total_seconds() / 3600.0
 
     try:
-        num = float(s)
-        if 0 <= num <= 1:
-            return num * 24.0
-        return num
+        return float(s)
     except Exception:
         return np.nan
 
