@@ -2,13 +2,14 @@
 # ============================================================
 # BSNL SLA BILL CHECKER - LOGIC ONLY (FOR STREAMLIT CLOUD / WEB)
 # Same logic as Desktop V4.2
-# Changes (ONLY notes + month parse + relaying retention option + MTTR export cleanup):
+# Changes (notes + month parse + relaying retention option + MTTR export cleanup + duration conversion fix):
 # 1) Month parsing FIX (supports Timestamp / YYYY-MM-DD)
 # 2) Accounts Note TXT: final approved format
 # 3) Penalty Clause 14.1 TXT: includes RKM, Rate, Total service value + SES blank line
 # 4) 1% Relaying Not Done can be treated as Retention (checkbox from UI)
 # 5) MTTR_Fault_Report: remove blank columns + add "Route Missing in A"
 # 6) NEW: Route wise Fault Count Details table under Availability section in penalty note
+# 7) FIX: Fault duration conversion now supports Excel hh:mm / hh:mm:ss / decimal reliably using direct cell read
 # ============================================================
 
 import os
@@ -19,6 +20,7 @@ from datetime import datetime, date, time
 
 import pandas as pd
 import numpy as np
+import openpyxl
 
 
 # -----------------------------
@@ -70,10 +72,11 @@ def read_excel_any(path, header=0):
     return pd.read_excel(path, header=header)
 
 
-def parse_duration_to_hours(val):
+def parse_duration_to_hours(val, number_format=None):
     """
     Accept duration in any of these forms:
     - decimal hours (e.g. 5.75)
+    - Excel time fraction (e.g. 0.8722 for 20:56:00) -> converts by *24
     - HH:MM
     - HH:MM:SS
     - datetime.time / python time object
@@ -88,6 +91,8 @@ def parse_duration_to_hours(val):
     except Exception:
         pass
 
+    fmt = "" if number_format is None else str(number_format).lower()
+
     if isinstance(val, pd.Timedelta):
         return val.total_seconds() / 3600.0
 
@@ -101,9 +106,26 @@ def parse_duration_to_hours(val):
         return val.hour + (val.minute / 60.0) + (val.second / 3600.0)
 
     if isinstance(val, (int, float, np.integer, np.floating)):
-        if np.isnan(val):
+        try:
+            num = float(val)
+        except Exception:
             return np.nan
-        return float(val)
+        if np.isnan(num):
+            return np.nan
+
+        # Excel stores time as fraction of a day; decimal hours should remain as-is.
+        # If number format indicates time/duration, always convert by *24.
+        if fmt:
+            fmt_no_brackets = fmt.replace("[h]", "h").replace("[m]", "m").replace("[s]", "s")
+            if any(token in fmt_no_brackets for token in ["h:mm", "hh:mm", "m:ss", "mm:ss", "h:mm:ss", "hh:mm:ss"]):
+                return num * 24.0
+
+        # Heuristic fallback:
+        # if numeric value is between 0 and 1, it is usually an Excel time fraction.
+        if 0 <= num <= 1:
+            return num * 24.0
+
+        return num
 
     s = str(val).strip()
     if s == "":
@@ -121,9 +143,44 @@ def parse_duration_to_hours(val):
         return td.total_seconds() / 3600.0
 
     try:
-        return float(s)
+        num = float(s)
+        if 0 <= num <= 1:
+            return num * 24.0
+        return num
     except Exception:
         return np.nan
+
+
+def get_excel_duration_series(excel_path, duration_header):
+    """
+    Read the duration column directly from Excel so time-formatted cells
+    (hh:mm or hh:mm:ss) are converted reliably even if pandas changes type.
+    """
+    try:
+        wb = openpyxl.load_workbook(excel_path, data_only=False, read_only=False)
+        ws = wb[wb.sheetnames[0]]
+
+        duration_header_norm = str(duration_header).strip()
+        col_idx = None
+        for c in range(1, ws.max_column + 1):
+            hdr = ws.cell(1, c).value
+            if str(hdr).strip() == duration_header_norm:
+                col_idx = c
+                break
+
+        if col_idx is None:
+            wb.close()
+            return None
+
+        values = []
+        for row in range(2, ws.max_row + 1):
+            cell = ws.cell(row=row, column=col_idx)
+            values.append(parse_duration_to_hours(cell.value, cell.number_format))
+
+        wb.close()
+        return values
+    except Exception:
+        return None
 
 
 def uptime_deduction_pct(uptime_pct):
@@ -351,7 +408,11 @@ def process_sla(
 
     exempt_col = find_exemption_column(faults.columns)
     faults["Is_Exempt"] = faults[exempt_col].apply(robust_yes) if exempt_col else False
-    faults["Duration_Hrs"] = faults[duration_col].apply(parse_duration_to_hours)
+    duration_from_excel = get_excel_duration_series(annex_c_path, duration_col)
+    if duration_from_excel is not None and len(duration_from_excel) == len(faults):
+        faults["Duration_Hrs"] = duration_from_excel
+    else:
+        faults["Duration_Hrs"] = faults[duration_col].apply(parse_duration_to_hours)
 
     faults_valid = faults[(faults["Duration_Hrs"].notna()) & (faults["Duration_Hrs"] > 0)].copy()
     faults_invalid = faults[~((faults["Duration_Hrs"].notna()) & (faults["Duration_Hrs"] > 0))].copy()
