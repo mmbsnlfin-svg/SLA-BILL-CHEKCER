@@ -1,3 +1,4 @@
+
 # ============================================================
 # BSNL SLA BILL CHECKER - LOGIC ONLY (FOR STREAMLIT CLOUD / WEB)
 # Same logic as Desktop V4.2
@@ -14,7 +15,7 @@ import os
 import re
 import math
 import calendar
-from datetime import datetime, date
+from datetime import datetime, date, time
 
 import pandas as pd
 import numpy as np
@@ -70,11 +71,39 @@ def read_excel_any(path, header=0):
 
 
 def parse_duration_to_hours(val):
-    """Accept numeric hours OR HH:MM / HH:MM:SS."""
-    if pd.isna(val):
+    """
+    Accept duration in any of these forms:
+    - decimal hours (e.g. 5.75)
+    - HH:MM
+    - HH:MM:SS
+    - datetime.time / python time object
+    - pandas Timedelta / numpy timedelta64
+    """
+    if val is None:
         return np.nan
+
+    try:
+        if pd.isna(val):
+            return np.nan
+    except Exception:
+        pass
+
     if isinstance(val, pd.Timedelta):
         return val.total_seconds() / 3600.0
+
+    if isinstance(val, np.timedelta64):
+        return pd.to_timedelta(val).total_seconds() / 3600.0
+
+    if isinstance(val, (datetime, pd.Timestamp)):
+        return val.hour + (val.minute / 60.0) + (val.second / 3600.0)
+
+    if isinstance(val, time):
+        return val.hour + (val.minute / 60.0) + (val.second / 3600.0)
+
+    if isinstance(val, (int, float, np.integer, np.floating)):
+        if np.isnan(val):
+            return np.nan
+        return float(val)
 
     s = str(val).strip()
     if s == "":
@@ -86,6 +115,10 @@ def parse_duration_to_hours(val):
         m = int(parts[1])
         sec = int(parts[2]) if len(parts) == 3 else 0
         return h + (m / 60.0) + (sec / 3600.0)
+
+    if re.match(r"^\d+\s+days?\s+\d{1,2}:\d{2}(:\d{2})?$", s.lower()):
+        td = pd.to_timedelta(s)
+        return td.total_seconds() / 3600.0
 
     try:
         return float(s)
@@ -397,6 +430,8 @@ def process_sla(
     avail["Availability_Deduction_Exempted_Rs"] = (avail["Deduction_Rs_Gross"] - avail["Deduction_Rs_Net"]).round(2)
     avail["Availability_Deduction_Net_Rs"] = avail["Deduction_Rs_Net"]
 
+    availability_penalty_gross = round(float(avail["Deduction_Rs_Gross"].sum()), 2)
+    availability_penalty_exempt = round(float(avail["Availability_Deduction_Exempted_Rs"].sum()), 2)
     availability_penalty_net = round(float(avail["Availability_Deduction_Net_Rs"].sum()), 2)
 
     # ---------- Missing routes (for notes) ----------
@@ -432,6 +467,8 @@ def process_sla(
 
     # Higher-of rule
     field_unit_penalty = float(field_unit_penalty or 0.0)
+    system_sla_penalty_gross = round(mttr_gross + availability_penalty_gross, 2)
+    system_sla_exemption_total = round(mttr_exempt + availability_penalty_exempt, 2)
     system_sla_penalty_net = round(mttr_net_after_cap + availability_penalty_net, 2)
     higher_of_penalty = max(system_sla_penalty_net, field_unit_penalty)
 
@@ -554,6 +591,12 @@ Name of Maintenance Agency: {vendor_name}
 A) Net payable to vendor (Before Penalty)                          = Rs. {fmt_money(net_before_sla)}
 
 5) SLA Penalty Deduction (as per tender):
+   Total Penalty (MTTR + Availability)                             = Rs. {fmt_money(system_sla_penalty_gross)}
+   MTTR Exemption                                                  = Rs. {fmt_money(mttr_exempt)}
+   Availability Exemption                                          = Rs. {fmt_money(availability_penalty_exempt)}
+   Total Exemption                                                 = Rs. {fmt_money(system_sla_exemption_total)}
+   Net Penalty after exemption & MTTR cap                          = Rs. {fmt_money(system_sla_penalty_net)}
+
    MTTR Penalty (Net after exemption & 25% cap)                    = Rs. {fmt_money(mttr_net_after_cap)}   (Cap Applied: {mttr_cap_applied})
    Availability Penalty (Net)                                      = Rs. {fmt_money(availability_penalty_net)}
    -------------------------------------------------------------------------------
@@ -712,6 +755,8 @@ Penalty Details given below:-
    Cap Applied                                                    : {mttr_cap_applied}
 
 3. Availability Penalty (Route-wise)                              : Rs. {fmt_money(availability_penalty_net)}
+   Availability Exemption                                         : Rs. {fmt_money(availability_penalty_exempt)}
+   Availability Gross Penalty                                     : Rs. {fmt_money(availability_penalty_gross)}
 
    Availability details (Net):
 {chr(10).join(av_lines)}
@@ -719,12 +764,19 @@ Penalty Details given below:-
    Route wise Fault Count Details
 {chr(10).join(fc_lines)}
 
+   SLA Penalty Summary
+   Total Penalty (MTTR + Availability)                            : Rs. {fmt_money(system_sla_penalty_gross)}
+   MTTR Exemption                                                 : Rs. {fmt_money(mttr_exempt)}
+   Availability Exemption                                         : Rs. {fmt_money(availability_penalty_exempt)}
+   Total Exemption                                                : Rs. {fmt_money(system_sla_exemption_total)}
+   Net Penalty after exemption & MTTR cap                         : Rs. {fmt_money(system_sla_penalty_net)}
+
 4. Absense of Supervisor @ 1500 per day Rs.                       : Rs. {fmt_money(supervisor_abs_amt)}
 5. Absence of FRT @ 5000 Per day Rs.                              : Rs. {fmt_money(frt_abs_amt)}
 6. Absence of Petroller @ 500 Per day Rs.                         : Rs. {fmt_money(petroller_abs_amt)}
 {relaying_line_penalty_note}
 
-Total Penalty (1+2+3+4+5+6) Rs.                                   : Rs. {fmt_money(total_penalty_clause14)}
+Total Penalty (1+2+3+4+5+6+7 as applicable) Rs.                                   : Rs. {fmt_money(total_penalty_clause14)}
 Total Deduction (Penalty + Retention if any) Rs.                  : Rs. {fmt_money(total_deduction_penalty_note)}
 
 The supporting documents listed below have been verified
@@ -753,8 +805,14 @@ Submitted for approval please.
         ["Total Basic SLA (Σ RKM×Rate)", round(float(routes["SLA_Charges_Rs"].sum()), 2)],
         ["MTTR cap 25%", mttr_cap_25pct],
         ["MTTR cap applied", mttr_cap_applied],
+        ["MTTR gross", mttr_gross],
+        ["MTTR exemption", mttr_exempt],
         ["MTTR net after cap", mttr_net_after_cap],
+        ["Availability penalty gross", availability_penalty_gross],
+        ["Availability penalty exemption", availability_penalty_exempt],
         ["Availability penalty net", availability_penalty_net],
+        ["System SLA penalty gross", system_sla_penalty_gross],
+        ["System SLA total exemption", system_sla_exemption_total],
         ["System SLA penalty net", system_sla_penalty_net],
         ["Field unit penalty (info)", field_unit_penalty],
         ["Higher-of adopted penalty", higher_of_penalty],
