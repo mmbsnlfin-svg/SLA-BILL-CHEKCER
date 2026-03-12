@@ -16,7 +16,7 @@ import os
 import re
 import math
 import calendar
-from datetime import datetime, date, time
+from datetime import datetime, date, time, timedelta
 
 import pandas as pd
 import numpy as np
@@ -93,7 +93,7 @@ def parse_duration_to_hours(val, number_format=None):
 
     fmt = "" if number_format is None else str(number_format).lower()
 
-    if isinstance(val, pd.Timedelta):
+    if isinstance(val, (timedelta, pd.Timedelta)):
         return val.total_seconds() / 3600.0
 
     if isinstance(val, np.timedelta64):
