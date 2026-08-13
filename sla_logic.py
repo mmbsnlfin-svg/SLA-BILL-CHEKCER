@@ -840,7 +840,7 @@ A) Net payable to vendor (Before Penalty/Retention)                = Rs. {fmt_mo
    Splice loss per fiber                                           = Rs. {fmt_money(splice_loss_amt)}
    Absence of Supervisor @1500/day                                 = Rs. {fmt_money(supervisor_abs_amt)}
    Absence of FRT @5000/day                                        = Rs. {fmt_money(frt_abs_amt)}
-   Absence of Petroller @500/day                                   = Rs. {fmt_money(petroller_abs_amt)}
+   Absence of Petroller @1000/day                                   = Rs. {fmt_money(petroller_abs_amt)}
 {relaying_line_accounts}
    Any other recovery                                              = Rs. {fmt_money(other_recovery)}
    -------------------------------------------------------------------------------
@@ -1008,7 +1008,7 @@ Penalty Details given below:-
 
 4. Absense of Supervisor @ 1500 per day Rs.                       : Rs. {fmt_money(supervisor_abs_amt)}
 5. Absence of FRT @ 5000 Per day Rs.                              : Rs. {fmt_money(frt_abs_amt)}
-6. Absence of Petroller @ 500 Per day Rs.                         : Rs. {fmt_money(petroller_abs_amt)}
+6. Absence of Petroller @ 1000 Per day Rs.                         : Rs. {fmt_money(petroller_abs_amt)}
 {relaying_line_penalty_note}
 
 Total Penalty (1+2+3+4+5+6+7 as applicable) Rs.                                   : Rs. {fmt_money(total_penalty_clause14)}
