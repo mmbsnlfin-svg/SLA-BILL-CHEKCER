@@ -469,13 +469,16 @@ def process_sla(
 
     sla_month_raw = routes["Month"].iloc[0] if len(routes) else ""
     year, month = parse_month_year_from_value(sla_month_raw)
-    if year is None or month is None:
-        now = datetime.now()
-        year, month = now.year, now.month
+    month_source = "Format-A" if (year is not None and month is not None) else "Pending Format-C fallback"
 
-    days_in_month = calendar.monthrange(year, month)[1]
-    total_hours_month = float(days_in_month * 24)
-    month_name = calendar.month_name[month]
+    # IMPORTANT: Do not default immediately to current month here.
+    # Some field Format-A files can have a shifted/non-date value (e.g. "RKM")
+    # in the Month column. In that case the actual service/fault month from
+    # Format-C is used after Format-C is read.
+
+    days_in_month = None
+    total_hours_month = None
+    month_name = None
 
     month_display = f"{month_name}-{year}"
     month_display_short = f"{month_name[:3]}-{year}"
@@ -515,6 +518,39 @@ def process_sla(
 
     faults_valid = faults[(faults["Duration_Hrs"].notna()) & (faults["Duration_Hrs"] > 0)].copy()
     faults_invalid = faults[~((faults["Duration_Hrs"].notna()) & (faults["Duration_Hrs"] > 0))].copy()
+
+    # ---------- Resolve actual SLA month / calendar days ----------
+    # Tender Annexure-C2 uses "Total days in Month x 24 hrs".
+    # Therefore July=31 days, September=30 days, February=28/29 days, etc.
+    # If Format-A Month is invalid/misaligned, use the valid Month from Format-C.
+    fault_month_col = "Month" if "Month" in faults_valid.columns else None
+    faults_valid["Fault_Year"] = np.nan
+    faults_valid["Fault_Month"] = np.nan
+    if fault_month_col:
+        parsed_ym = faults_valid[fault_month_col].apply(parse_month_year_from_value)
+        faults_valid["Fault_Year"] = parsed_ym.apply(lambda x: x[0] if x else None)
+        faults_valid["Fault_Month"] = parsed_ym.apply(lambda x: x[1] if x else None)
+
+        valid_month_pairs = [
+            (int(y), int(m))
+            for y, m in zip(faults_valid["Fault_Year"], faults_valid["Fault_Month"])
+            if pd.notna(y) and pd.notna(m) and 1 <= int(m) <= 12
+        ]
+        if (year is None or month is None) and valid_month_pairs:
+            # Monthly SLA input should normally contain one month. If more than one
+            # appears, use the most frequent valid month as the billing-month fallback.
+            from collections import Counter
+            (year, month), _ = Counter(valid_month_pairs).most_common(1)[0]
+            month_source = "Format-C fault month (fallback because Format-A Month is invalid)"
+
+    if year is None or month is None:
+        now = datetime.now()
+        year, month = now.year, now.month
+        month_source = "System month fallback (no valid month found in Format-A/Format-C)"
+
+    days_in_month = calendar.monthrange(int(year), int(month))[1]
+    total_hours_month = float(days_in_month * 24)
+    month_name = calendar.month_name[int(month)]
 
     # Mapping ID first then Name
     faults_valid["Route_ID_mapped_by_id"] = faults_valid["Route_ID_raw"].where(faults_valid["Route_ID_raw"].isin(route_ids_in_a))
@@ -576,8 +612,38 @@ def process_sla(
     avail["Downtime_Hrs_Net"] = avail["Downtime_Hrs_Net"].fillna(0.0)
     avail["Downtime_Exempted_Hrs"] = (avail["Downtime_Hrs_Total"] - avail["Downtime_Hrs_Net"]).round(4)
 
-    avail["Uptime_pct_Gross"] = ((total_hours_month - avail["Downtime_Hrs_Total"]) / total_hours_month) * 100.0
-    avail["Uptime_pct_Net"] = ((total_hours_month - avail["Downtime_Hrs_Net"]) / total_hours_month) * 100.0
+    # Route-wise month denominator. Prefer the actual valid fault month from Format-C.
+    # This prevents a July route from being calculated on a 30-day/720-hour base.
+    route_month_map = {}
+    if "Fault_Year" in faults_valid.columns and "Fault_Month" in faults_valid.columns:
+        month_rows = faults_valid[
+            faults_valid["Fault_Year"].notna() & faults_valid["Fault_Month"].notna()
+        ][["Route_ID_Final", "Fault_Year", "Fault_Month"]].copy()
+        if len(month_rows):
+            month_rows["YM"] = list(zip(month_rows["Fault_Year"].astype(int), month_rows["Fault_Month"].astype(int)))
+            for rid, grp in month_rows.groupby("Route_ID_Final"):
+                vals = grp["YM"].tolist()
+                if vals:
+                    from collections import Counter
+                    route_month_map[str(rid)] = Counter(vals).most_common(1)[0][0]
+
+    def _route_calendar_values(route_id):
+        ry, rm = route_month_map.get(str(route_id), (int(year), int(month)))
+        rd = calendar.monthrange(int(ry), int(rm))[1]
+        return int(ry), int(rm), int(rd), float(rd * 24)
+
+    route_cal = avail["Route_ID"].apply(_route_calendar_values)
+    avail["Calc_Year"] = route_cal.apply(lambda x: x[0])
+    avail["Calc_Month"] = route_cal.apply(lambda x: x[1])
+    avail["Days_In_Month"] = route_cal.apply(lambda x: x[2])
+    avail["Total_Hours_Month"] = route_cal.apply(lambda x: x[3])
+    avail["Month_Used_For_Uptime"] = avail.apply(
+        lambda r: f"{calendar.month_name[int(r['Calc_Month'])]}-{int(r['Calc_Year'])}", axis=1
+    )
+
+    # Use exact decimal uptime for deduction slab determination; do not round first.
+    avail["Uptime_pct_Gross"] = ((avail["Total_Hours_Month"] - avail["Downtime_Hrs_Total"]) / avail["Total_Hours_Month"]) * 100.0
+    avail["Uptime_pct_Net"] = ((avail["Total_Hours_Month"] - avail["Downtime_Hrs_Net"]) / avail["Total_Hours_Month"]) * 100.0
     avail["Uptime_pct_Gross"] = avail["Uptime_pct_Gross"].clip(0, 100)
     avail["Uptime_pct_Net"] = avail["Uptime_pct_Net"].clip(0, 100)
 
@@ -840,7 +906,7 @@ A) Net payable to vendor (Before Penalty/Retention)                = Rs. {fmt_mo
    Splice loss per fiber                                           = Rs. {fmt_money(splice_loss_amt)}
    Absence of Supervisor @1500/day                                 = Rs. {fmt_money(supervisor_abs_amt)}
    Absence of FRT @5000/day                                        = Rs. {fmt_money(frt_abs_amt)}
-   Absence of Petroller @1000/day                                   = Rs. {fmt_money(petroller_abs_amt)}
+   Absence of Petroller @500/day                                   = Rs. {fmt_money(petroller_abs_amt)}
 {relaying_line_accounts}
    Any other recovery                                              = Rs. {fmt_money(other_recovery)}
    -------------------------------------------------------------------------------
@@ -1008,7 +1074,7 @@ Penalty Details given below:-
 
 4. Absense of Supervisor @ 1500 per day Rs.                       : Rs. {fmt_money(supervisor_abs_amt)}
 5. Absence of FRT @ 5000 Per day Rs.                              : Rs. {fmt_money(frt_abs_amt)}
-6. Absence of Petroller @ 1000 Per day Rs.                         : Rs. {fmt_money(petroller_abs_amt)}
+6. Absence of Petroller @ 500 Per day Rs.                         : Rs. {fmt_money(petroller_abs_amt)}
 {relaying_line_penalty_note}
 
 Total Penalty (1+2+3+4+5+6+7 as applicable) Rs.                                   : Rs. {fmt_money(total_penalty_clause14)}
@@ -1035,7 +1101,9 @@ Submitted for approval please.
         ["OA", oa_name],
         ["Vendor", vendor_name],
         ["SLA Month (Format-A raw)", str(sla_month_raw)],
-        ["Month used for days calculation", f"{month_name} {year} ({days_in_month} days)"],
+        ["Month source used", month_source],
+        ["Default month used for routes without valid fault month", f"{month_name} {year} ({days_in_month} days)"],
+        ["Uptime denominator rule", "Actual calendar days of route/fault month x 24 hrs"],
         ["Total RKM", total_rkm],
         ["Rate per KM", rate_per_km],
         ["Total Basic SLA (Σ RKM×Rate)", round(float(routes["SLA_Charges_Rs"].sum()), 2)],
