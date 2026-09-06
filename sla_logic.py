@@ -433,6 +433,7 @@ def process_sla(
     petroller_abs_amt=0.0,
     relaying_not_done_amt=0.0,
     relaying_as_retention=False,
+    billing_month=None,
 ):
     # ---------- Read Format A ----------
     a = read_excel_any(annex_a_path, header=0)
@@ -467,24 +468,26 @@ def process_sla(
     oa_name = pick_first_nonblank(routes["OA"].tolist())
     vendor_name = pick_first_nonblank(routes["Vendor_Name"].tolist())
 
-    sla_month_raw = routes["Month"].iloc[0] if len(routes) else ""
-    year, month = parse_month_year_from_value(sla_month_raw)
-    month_source = "Format-A" if (year is not None and month is not None) else "Pending Format-C fallback"
-
-    # IMPORTANT: Do not default immediately to current month here.
-    # Some field Format-A files can have a shifted/non-date value (e.g. "RKM")
-    # in the Month column. In that case the actual service/fault month from
-    # Format-C is used after Format-C is read.
+    # ---------- Authoritative billing month ----------
+    # Normal production runs pass billing_month from the Streamlit UI (e.g. "Jul-2026").
+    # That selected month is the master month for the entire SLA run and for uptime hours.
+    # Format-A Month is NOT used for calculation when billing_month is supplied.
+    if billing_month is not None and str(billing_month).strip() != "":
+        year, month = parse_month_year_from_value(billing_month)
+        if year is None or month is None:
+            raise ValueError(
+                f"Invalid selected billing month '{billing_month}'. Expected format like Jul-2026."
+            )
+        month_source = "UI selected billing month"
+    else:
+        # Backward compatibility for any older/non-UI call.
+        sla_month_raw = routes["Month"].iloc[0] if len(routes) else ""
+        year, month = parse_month_year_from_value(sla_month_raw)
+        month_source = "Format-A fallback" if (year is not None and month is not None) else "Pending Format-C fallback"
 
     days_in_month = None
     total_hours_month = None
     month_name = None
-
-    month_display = f"{month_name}-{year}"
-    month_display_short = f"{month_name[:3]}-{year}"
-
-    vendor_tag = sanitize_filename(vendor_name)
-    month_tag2 = sanitize_filename(month_display)
 
     # Maps
     name_to_id = routes.set_index("Route_Name_norm")["Route_ID"].to_dict()
@@ -519,38 +522,70 @@ def process_sla(
     faults_valid = faults[(faults["Duration_Hrs"].notna()) & (faults["Duration_Hrs"] > 0)].copy()
     faults_invalid = faults[~((faults["Duration_Hrs"].notna()) & (faults["Duration_Hrs"] > 0))].copy()
 
-    # ---------- Resolve actual SLA month / calendar days ----------
+    # ---------- Resolve / validate SLA month and calendar days ----------
     # Tender Annexure-C2 uses "Total days in Month x 24 hrs".
-    # Therefore July=31 days, September=30 days, February=28/29 days, etc.
-    # If Format-A Month is invalid/misaligned, use the valid Month from Format-C.
+    # The UI-selected billing month is authoritative when supplied.
+    # Format-C Month is used only as a validation check, not to change the denominator.
     fault_month_col = "Month" if "Month" in faults_valid.columns else None
     faults_valid["Fault_Year"] = np.nan
     faults_valid["Fault_Month"] = np.nan
+
+    valid_month_pairs = []
     if fault_month_col:
         parsed_ym = faults_valid[fault_month_col].apply(parse_month_year_from_value)
         faults_valid["Fault_Year"] = parsed_ym.apply(lambda x: x[0] if x else None)
         faults_valid["Fault_Month"] = parsed_ym.apply(lambda x: x[1] if x else None)
-
         valid_month_pairs = [
             (int(y), int(m))
             for y, m in zip(faults_valid["Fault_Year"], faults_valid["Fault_Month"])
             if pd.notna(y) and pd.notna(m) and 1 <= int(m) <= 12
         ]
+
+    if billing_month is not None and str(billing_month).strip() != "":
+        selected_pair = (int(year), int(month))
+        mismatched_pairs = sorted(set(p for p in valid_month_pairs if p != selected_pair))
+        if mismatched_pairs:
+            mismatch_text = ", ".join(
+                f"{calendar.month_abbr[m]}-{y}" for y, m in mismatched_pairs
+            )
+            raise ValueError(
+                f"Selected billing month is {calendar.month_abbr[int(month)]}-{int(year)}, "
+                f"but Format-C contains fault month(s): {mismatch_text}. "
+                "Please upload the Format-C file for the selected month or change the Month selection."
+            )
+    else:
+        # Backward compatibility only: if no UI month was passed, use Format-C as fallback.
         if (year is None or month is None) and valid_month_pairs:
-            # Monthly SLA input should normally contain one month. If more than one
-            # appears, use the most frequent valid month as the billing-month fallback.
             from collections import Counter
             (year, month), _ = Counter(valid_month_pairs).most_common(1)[0]
-            month_source = "Format-C fault month (fallback because Format-A Month is invalid)"
+            month_source = "Format-C fault month fallback"
 
     if year is None or month is None:
         now = datetime.now()
         year, month = now.year, now.month
-        month_source = "System month fallback (no valid month found in Format-A/Format-C)"
+        month_source = "System month fallback (legacy/non-UI call only)"
 
     days_in_month = calendar.monthrange(int(year), int(month))[1]
     total_hours_month = float(days_in_month * 24)
     month_name = calendar.month_name[int(month)]
+
+    # Build month labels only after the authoritative month/year is resolved.
+    month_display = f"{month_name}-{int(year)}"
+    month_display_short = f"{month_name[:3]}-{int(year)}"
+    vendor_tag = sanitize_filename(vendor_name)
+    month_tag2 = sanitize_filename(month_display)
+
+    # Keep the selected billing month visible on every valid fault row for audit.
+    faults_valid["Selected_Billing_Month"] = month_display_short
+    faults_valid["Fault_Month_Mismatch"] = np.where(
+        faults_valid["Fault_Year"].notna() & faults_valid["Fault_Month"].notna(),
+        np.where(
+            (faults_valid["Fault_Year"].astype("Int64") == int(year)) &
+            (faults_valid["Fault_Month"].astype("Int64") == int(month)),
+            "NO", "YES"
+        ),
+        "NOT CHECKED"
+    )
 
     # Mapping ID first then Name
     faults_valid["Route_ID_mapped_by_id"] = faults_valid["Route_ID_raw"].where(faults_valid["Route_ID_raw"].isin(route_ids_in_a))
@@ -612,34 +647,14 @@ def process_sla(
     avail["Downtime_Hrs_Net"] = avail["Downtime_Hrs_Net"].fillna(0.0)
     avail["Downtime_Exempted_Hrs"] = (avail["Downtime_Hrs_Total"] - avail["Downtime_Hrs_Net"]).round(4)
 
-    # Route-wise month denominator. Prefer the actual valid fault month from Format-C.
-    # This prevents a July route from being calculated on a 30-day/720-hour base.
-    route_month_map = {}
-    if "Fault_Year" in faults_valid.columns and "Fault_Month" in faults_valid.columns:
-        month_rows = faults_valid[
-            faults_valid["Fault_Year"].notna() & faults_valid["Fault_Month"].notna()
-        ][["Route_ID_Final", "Fault_Year", "Fault_Month"]].copy()
-        if len(month_rows):
-            month_rows["YM"] = list(zip(month_rows["Fault_Year"].astype(int), month_rows["Fault_Month"].astype(int)))
-            for rid, grp in month_rows.groupby("Route_ID_Final"):
-                vals = grp["YM"].tolist()
-                if vals:
-                    from collections import Counter
-                    route_month_map[str(rid)] = Counter(vals).most_common(1)[0][0]
-
-    def _route_calendar_values(route_id):
-        ry, rm = route_month_map.get(str(route_id), (int(year), int(month)))
-        rd = calendar.monthrange(int(ry), int(rm))[1]
-        return int(ry), int(rm), int(rd), float(rd * 24)
-
-    route_cal = avail["Route_ID"].apply(_route_calendar_values)
-    avail["Calc_Year"] = route_cal.apply(lambda x: x[0])
-    avail["Calc_Month"] = route_cal.apply(lambda x: x[1])
-    avail["Days_In_Month"] = route_cal.apply(lambda x: x[2])
-    avail["Total_Hours_Month"] = route_cal.apply(lambda x: x[3])
-    avail["Month_Used_For_Uptime"] = avail.apply(
-        lambda r: f"{calendar.month_name[int(r['Calc_Month'])]}-{int(r['Calc_Year'])}", axis=1
-    )
+    # Uptime denominator comes only from the authoritative selected billing month.
+    # Example: Jul-2026 = 31 days = 744 hours; Sep-2026 = 30 days = 720 hours.
+    avail["Calc_Year"] = int(year)
+    avail["Calc_Month"] = int(month)
+    avail["Days_In_Month"] = int(days_in_month)
+    avail["Total_Hours_Month"] = float(total_hours_month)
+    avail["Month_Used_For_Uptime"] = month_display
+    avail["Month_Source"] = month_source
 
     # Use exact decimal uptime for deduction slab determination; do not round first.
     avail["Uptime_pct_Gross"] = ((avail["Total_Hours_Month"] - avail["Downtime_Hrs_Total"]) / avail["Total_Hours_Month"]) * 100.0
@@ -1103,7 +1118,7 @@ Submitted for approval please.
         ["SLA Month (Format-A raw)", str(sla_month_raw)],
         ["Month source used", month_source],
         ["Default month used for routes without valid fault month", f"{month_name} {year} ({days_in_month} days)"],
-        ["Uptime denominator rule", "Actual calendar days of route/fault month x 24 hrs"],
+        ["Uptime denominator rule", "Actual calendar days of UI-selected billing month x 24 hrs"],
         ["Total RKM", total_rkm],
         ["Rate per KM", rate_per_km],
         ["Total Basic SLA (Σ RKM×Rate)", round(float(routes["SLA_Charges_Rs"].sum()), 2)],
