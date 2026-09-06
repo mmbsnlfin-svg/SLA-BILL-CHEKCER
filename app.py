@@ -488,16 +488,12 @@ if submitted:
                 uploaded_ba = str(a_full["BA"].dropna().astype(str).iloc[0]).strip() if "BA" in a_full.columns and len(a_full.dropna(how="all")) else ""
                 uploaded_oa = str(a_full["OA"].dropna().astype(str).iloc[0]).strip() if "OA" in a_full.columns and len(a_full.dropna(how="all")) else ""
                 uploaded_vendor = str(a_full["Name of Maintenance Agency"].dropna().astype(str).iloc[0]).strip() if "Name of Maintenance Agency" in a_full.columns and len(a_full.dropna(how="all")) else ""
-                uploaded_month = str(a_full["Month"].dropna().astype(str).iloc[0]).strip() if "Month" in a_full.columns and len(a_full.dropna(how="all")) else ""
-
                 if uploaded_ba and uploaded_ba.lower() != selected_ba.lower():
                     st.warning(f"Selected BA is '{selected_ba}', but Format A BA is '{uploaded_ba}'. Please verify.")
                 if uploaded_oa and uploaded_oa.lower() != selected_oa.lower():
                     st.warning(f"Selected OA is '{selected_oa}', but Format A OA is '{uploaded_oa}'. Please verify.")
                 if uploaded_vendor and uploaded_vendor.lower() != selected_vendor.lower():
                     st.warning(f"Selected Vendor is '{selected_vendor}', but Format A Vendor is '{uploaded_vendor}'. Please verify.")
-                if uploaded_month and selected_month.lower() not in uploaded_month.lower():
-                    st.info(f"Selected Month = {selected_month}; Format A Month detected = {uploaded_month}")
             except Exception:
                 pass
 
@@ -520,6 +516,7 @@ if submitted:
                 petroller_abs_amt=pet,
                 relaying_not_done_amt=relay,
                 relaying_as_retention=bool(relaying_as_retention),
+                billing_month=selected_month,
             )
 
             zip_buffer = io.BytesIO()
