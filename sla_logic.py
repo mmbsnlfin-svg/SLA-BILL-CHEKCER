@@ -1115,7 +1115,7 @@ Submitted for approval please.
         ["BA", ba_name],
         ["OA", oa_name],
         ["Vendor", vendor_name],
-        ["SLA Month (Format-A raw)", str(sla_month_raw)],
+        ["Selected Billing Month", month_display_short],
         ["Month source used", month_source],
         ["Default month used for routes without valid fault month", f"{month_name} {year} ({days_in_month} days)"],
         ["Uptime denominator rule", "Actual calendar days of UI-selected billing month x 24 hrs"],
