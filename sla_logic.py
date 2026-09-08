@@ -752,13 +752,12 @@ def process_sla(
     system_sla_exemption_total = system_sla_retention_total
     mttr_net_after_cap = mttr_penalty_recoverable
 
+    # Field Unit / SES penalty is treated as the TOTAL penalty figure for comparison.
+    # Do not compare it with SLA alone and then add manual penalties again,
+    # because that double-counts manual Clause 14 penalties already included by the field unit.
     field_unit_penalty = float(field_unit_penalty or 0.0)
-    higher_of_penalty = max(system_sla_penalty_net, field_unit_penalty)
 
     vendor_deducted_penalty = float(vendor_deducted_penalty or 0.0)
-    sla_recovery_after_vendor = round(
-        max(higher_of_penalty - vendor_deducted_penalty, 0.0), 2
-    )
 
     # ---------- Accounts computations ----------
     total_rkm = round(float(routes["Route_KM"].sum()), 2)
@@ -812,12 +811,24 @@ def process_sla(
         splice_loss_amt + supervisor_abs_amt + frt_abs_amt + petroller_abs_amt + relaying_penalty_amt + other_recovery, 2
     )
 
+    # Total code-calculated recoverable penalty = SLA penalty + manual penalties/recoveries.
+    # Compare this TOTAL with Field Unit / SES total penalty and adopt the higher figure ONCE.
+    code_total_penalty_recoverable = round(
+        system_sla_penalty_net + manual_penalties_accounts, 2
+    )
+    higher_of_penalty = round(
+        max(code_total_penalty_recoverable, field_unit_penalty), 2
+    )
+    sla_recovery_after_vendor = round(
+        max(higher_of_penalty - vendor_deducted_penalty, 0.0), 2
+    )
+
     sla_retention_pending_total = round(system_sla_retention_total, 2)
 
+    # Adopted penalty already includes manual penalties; add only separate retentions here.
     total_deductions_accounts = round(
         sla_recovery_after_vendor
         + sla_retention_pending_total
-        + manual_penalties_accounts
         + relaying_retention_amt,
         2
     )
@@ -908,10 +919,11 @@ A) Net payable to vendor (Before Penalty/Retention)                = Rs. {fmt_mo
    -------------------------------------------------------------------------------
 
    Penalty as per Field Unit / SES (Info)                          = Rs. {fmt_money(field_unit_penalty)}
-   Adopted Penalty (Higher of Net SLA / Field Unit)                = Rs. {fmt_money(higher_of_penalty)}
+   Code Total Penalty (SLA + Manual Recoveries)                = Rs. {fmt_money(code_total_penalty_recoverable)}
+   Adopted Total Penalty (Higher of Code Total / Field Unit)       = Rs. {fmt_money(higher_of_penalty)}
 
    Vendor already deducted SLA penalty (if any)                    = Rs. {fmt_money(vendor_deducted_penalty)}
-   Net SLA recovery after vendor deduction                         = Rs. {fmt_money(sla_recovery_after_vendor)}
+   Net Penalty Recovery after vendor deduction                         = Rs. {fmt_money(sla_recovery_after_vendor)}
 
    Note: Retention against faults marked as exempted is pending scrutiny.
    If exemption is approved by Competent Authority, applicable retention may be released.
@@ -929,7 +941,7 @@ A) Net payable to vendor (Before Penalty/Retention)                = Rs. {fmt_mo
 {retention_block_accounts}
 7) SLA Retention Pending Scrutiny                                  = Rs. {fmt_money(sla_retention_pending_total)}
 
-B) Total Deductions (Penalty + SLA Retention + Manual + Other Retention)
+B) Total Deductions (Adopted Penalty + SLA Retention + Other Retention)
                                                                     = Rs. {fmt_money(total_deductions_accounts)}
 
 Net Payable to Vendor (A - B)                                      = Rs. {fmt_money(net_payable_after_all)}
@@ -1138,9 +1150,10 @@ Submitted for approval please.
         ["System SLA retention pending scrutiny", system_sla_retention_total],
         ["System SLA penalty recoverable", system_sla_penalty_net],
         ["Field unit penalty (info)", field_unit_penalty],
-        ["Higher-of adopted penalty", higher_of_penalty],
+        ["Code total penalty (SLA + manual recoveries)", code_total_penalty_recoverable],
+        ["Higher-of adopted total penalty", higher_of_penalty],
         ["Vendor already deducted SLA penalty", vendor_deducted_penalty],
-        ["Net SLA recovery after vendor deduction", sla_recovery_after_vendor],
+        ["Net Penalty Recovery after vendor deduction", sla_recovery_after_vendor],
         ["Clause 14.1 penalty total (excluding retention)", total_penalty_clause14],
         ["Relaying treated as retention", "YES" if relaying_as_retention else "NO"],
         ["Relaying retention amount", relaying_retention_amt],
