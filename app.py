@@ -45,7 +45,7 @@ st.markdown("""
     color: #0b2d6b;
     margin-bottom: 2px;
 }
-.version-badge {
+ .version-badge {
     display: inline-block;
     margin-left: 10px;
     padding: 4px 10px;
@@ -126,7 +126,7 @@ def normalize_cols(cols):
 def normalize_vendor_name(name):
     """Normalize common legal/style differences while preserving vendor identity."""
     s = str(name or "").strip().lower()
-    s = s.replace("&", " and ")
+    s = s.replace("&", " and " )
     s = re.sub(r"\bm\s*/?\s*s\b", " ", s)
     s = re.sub(r"[^a-z0-9\s]", " ", s)
 
@@ -516,7 +516,7 @@ if submitted:
                 st.stop()
 
             # -----------------------------
-            # Master selection consistency checks
+            # Optional month/vendor consistency checks
             # -----------------------------
             try:
                 a_full = pd.read_excel(a_path)
@@ -525,21 +525,22 @@ if submitted:
                 uploaded_ba = str(a_full["BA"].dropna().astype(str).iloc[0]).strip() if "BA" in a_full.columns and len(a_full.dropna(how="all")) else ""
                 uploaded_oa = str(a_full["OA"].dropna().astype(str).iloc[0]).strip() if "OA" in a_full.columns and len(a_full.dropna(how="all")) else ""
                 uploaded_vendor = str(a_full["Name of Maintenance Agency"].dropna().astype(str).iloc[0]).strip() if "Name of Maintenance Agency" in a_full.columns and len(a_full.dropna(how="all")) else ""
+                uploaded_month = str(a_full["Month"].dropna().astype(str).iloc[0]).strip() if "Month" in a_full.columns and len(a_full.dropna(how="all")) else ""
 
                 if uploaded_ba and uploaded_ba.lower() != selected_ba.lower():
                     st.error(f"BA mismatch ❌ Selected BA is '{selected_ba}', but Format A BA is '{uploaded_ba}'. Processing stopped.")
                     st.stop()
-
                 if uploaded_oa and uploaded_oa.lower() != selected_oa.lower():
                     st.error(f"OA mismatch ❌ Selected OA is '{selected_oa}', but Format A OA is '{uploaded_oa}'. Processing stopped.")
                     st.stop()
-
                 if uploaded_vendor and not vendor_names_match(selected_vendor, uploaded_vendor):
                     st.error(
                         f"Vendor mismatch ❌ Selected Vendor is '{selected_vendor}', but Format A Vendor is '{uploaded_vendor}'. "
                         "Processing stopped."
                     )
                     st.stop()
+                if uploaded_month and selected_month.lower() not in uploaded_month.lower():
+                    st.info(f"Selected Month = {selected_month}; Format A Month detected = {uploaded_month}")
             except Exception:
                 pass
 
@@ -562,7 +563,6 @@ if submitted:
                 petroller_abs_amt=pet,
                 relaying_not_done_amt=relay,
                 relaying_as_retention=bool(relaying_as_retention),
-                billing_month=selected_month,
             )
 
             zip_buffer = io.BytesIO()
