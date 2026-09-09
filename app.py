@@ -10,6 +10,8 @@ import pandas as pd
 
 from sla_logic import process_sla
 
+APP_VERSION = "2.0"
+
 st.set_page_config(
     page_title="BSNL SLA Bill Checker",
     layout="wide",
@@ -41,6 +43,17 @@ st.markdown("""
     font-weight: 800;
     color: #0b2d6b;
     margin-bottom: 2px;
+}
+.version-badge {
+    display: inline-block;
+    margin-left: 10px;
+    padding: 4px 10px;
+    border-radius: 999px;
+    background: #0b2d6b;
+    color: white;
+    font-size: 14px;
+    font-weight: 800;
+    vertical-align: middle;
 }
 .bsnl-subtitle {
     font-size: 14px;
@@ -238,9 +251,9 @@ def load_vendorinfo(path="vendorinfo.xlsx"):
 # -----------------------------
 # Header
 # -----------------------------
-st.markdown("""
+st.markdown(f"""
 <div class="bsnl-card">
-    <div class="bsnl-title">BSNL SLA Bill Checker</div>
+    <div class="bsnl-title">BSNL SLA Bill Checker <span class="version-badge">V{APP_VERSION}</span></div>
     <div class="bsnl-subtitle">Created by: Hrushikesh Kesale | MH Circle BSNL</div>
     <div class="bsnl-caption">
         Select Month, BA, OA and Vendor from master file → Upload Annexure A & Annexure C → Generate Excel + Accounts Note + Clause 14.1 Penalty Note
@@ -489,11 +502,14 @@ if submitted:
                 uploaded_oa = str(a_full["OA"].dropna().astype(str).iloc[0]).strip() if "OA" in a_full.columns and len(a_full.dropna(how="all")) else ""
                 uploaded_vendor = str(a_full["Name of Maintenance Agency"].dropna().astype(str).iloc[0]).strip() if "Name of Maintenance Agency" in a_full.columns and len(a_full.dropna(how="all")) else ""
                 if uploaded_ba and uploaded_ba.lower() != selected_ba.lower():
-                    st.warning(f"Selected BA is '{selected_ba}', but Format A BA is '{uploaded_ba}'. Please verify.")
+                    st.error(f"BA mismatch ❌ Selected BA is '{selected_ba}', but Format A BA is '{uploaded_ba}'. Processing stopped.")
+                    st.stop()
                 if uploaded_oa and uploaded_oa.lower() != selected_oa.lower():
-                    st.warning(f"Selected OA is '{selected_oa}', but Format A OA is '{uploaded_oa}'. Please verify.")
+                    st.error(f"OA mismatch ❌ Selected OA is '{selected_oa}', but Format A OA is '{uploaded_oa}'. Processing stopped.")
+                    st.stop()
                 if uploaded_vendor and uploaded_vendor.lower() != selected_vendor.lower():
-                    st.warning(f"Selected Vendor is '{selected_vendor}', but Format A Vendor is '{uploaded_vendor}'. Please verify.")
+                    st.error(f"Vendor mismatch ❌ Selected Vendor is '{selected_vendor}', but Format A Vendor is '{uploaded_vendor}'. Processing stopped.")
+                    st.stop()
             except Exception:
                 pass
 
