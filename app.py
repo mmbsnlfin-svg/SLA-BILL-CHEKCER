@@ -1,4 +1,5 @@
 import os
+import re
 import io
 import zipfile
 import tempfile
@@ -120,6 +121,29 @@ def normalize_cols(cols):
         s = " ".join(s.split())
         out.append(s)
     return out
+
+
+def normalize_vendor_name(name):
+    """Normalize common legal/style differences while preserving vendor identity."""
+    s = str(name or "").strip().lower()
+    s = s.replace("&", " and ")
+    s = re.sub(r"\bm\s*/?\s*s\b", " ", s)
+    s = re.sub(r"[^a-z0-9\s]", " ", s)
+
+    remove_words = {"pvt", "private", "ltd", "limited"}
+    words = []
+    for word in s.split():
+        if word in remove_words:
+            continue
+        if word == "constructions":
+            word = "construction"
+        words.append(word)
+
+    return " ".join(words)
+
+
+def vendor_names_match(master_name, uploaded_name):
+    return normalize_vendor_name(master_name) == normalize_vendor_name(uploaded_name)
 
 
 def classify_file(columns_list):
@@ -492,7 +516,7 @@ if submitted:
                 st.stop()
 
             # -----------------------------
-            # Optional month/vendor consistency checks
+            # Master selection consistency checks
             # -----------------------------
             try:
                 a_full = pd.read_excel(a_path)
@@ -501,14 +525,20 @@ if submitted:
                 uploaded_ba = str(a_full["BA"].dropna().astype(str).iloc[0]).strip() if "BA" in a_full.columns and len(a_full.dropna(how="all")) else ""
                 uploaded_oa = str(a_full["OA"].dropna().astype(str).iloc[0]).strip() if "OA" in a_full.columns and len(a_full.dropna(how="all")) else ""
                 uploaded_vendor = str(a_full["Name of Maintenance Agency"].dropna().astype(str).iloc[0]).strip() if "Name of Maintenance Agency" in a_full.columns and len(a_full.dropna(how="all")) else ""
+
                 if uploaded_ba and uploaded_ba.lower() != selected_ba.lower():
                     st.error(f"BA mismatch ❌ Selected BA is '{selected_ba}', but Format A BA is '{uploaded_ba}'. Processing stopped.")
                     st.stop()
+
                 if uploaded_oa and uploaded_oa.lower() != selected_oa.lower():
                     st.error(f"OA mismatch ❌ Selected OA is '{selected_oa}', but Format A OA is '{uploaded_oa}'. Processing stopped.")
                     st.stop()
-                if uploaded_vendor and uploaded_vendor.lower() != selected_vendor.lower():
-                    st.error(f"Vendor mismatch ❌ Selected Vendor is '{selected_vendor}', but Format A Vendor is '{uploaded_vendor}'. Processing stopped.")
+
+                if uploaded_vendor and not vendor_names_match(selected_vendor, uploaded_vendor):
+                    st.error(
+                        f"Vendor mismatch ❌ Selected Vendor is '{selected_vendor}', but Format A Vendor is '{uploaded_vendor}'. "
+                        "Processing stopped."
+                    )
                     st.stop()
             except Exception:
                 pass
