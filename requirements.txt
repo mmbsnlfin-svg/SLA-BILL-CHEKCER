@@ -4,4 +4,3 @@ numpy
 openpyxl
 xlrd
 reportlab
--e .
