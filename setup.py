@@ -1,3 +1,2 @@
-from setuptools import setup
-
-setup(name="sla-bill-checker", version="2.0")
+# No custom startup patch is required in V2.0.
+# PDF version/date/time stamping is implemented directly in sla_logic.py.
