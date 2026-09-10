@@ -585,16 +585,27 @@ def process_sla(
     month_tag2 = sanitize_filename(month_display)
 
     # Keep the selected billing month visible on every valid fault row for audit.
+    # IMPORTANT: Format-C may legitimately have no Month column. In that case
+    # Fault_Year/Fault_Month are blank. Do not run np.where on pandas nullable
+    # integer comparisons because pd.NA cannot be converted to bool.
     faults_valid["Selected_Billing_Month"] = month_display_short
-    faults_valid["Fault_Month_Mismatch"] = np.where(
-        faults_valid["Fault_Year"].notna() & faults_valid["Fault_Month"].notna(),
-        np.where(
-            (faults_valid["Fault_Year"].astype("Int64") == int(year)) &
-            (faults_valid["Fault_Month"].astype("Int64") == int(month)),
-            "NO", "YES"
-        ),
-        "NOT CHECKED"
+    faults_valid["Fault_Month_Mismatch"] = "NOT CHECKED"
+
+    valid_fault_month_mask = (
+        faults_valid["Fault_Year"].notna() &
+        faults_valid["Fault_Month"].notna()
     )
+
+    if valid_fault_month_mask.any():
+        fault_year_checked = faults_valid.loc[valid_fault_month_mask, "Fault_Year"].astype(int)
+        fault_month_checked = faults_valid.loc[valid_fault_month_mask, "Fault_Month"].astype(int)
+        month_match_mask = (
+            (fault_year_checked == int(year)) &
+            (fault_month_checked == int(month))
+        )
+        faults_valid.loc[valid_fault_month_mask, "Fault_Month_Mismatch"] = np.where(
+            month_match_mask, "NO", "YES"
+        )
 
     # Mapping ID first then Name
     faults_valid["Route_ID_mapped_by_id"] = faults_valid["Route_ID_raw"].where(faults_valid["Route_ID_raw"].isin(route_ids_in_a))
